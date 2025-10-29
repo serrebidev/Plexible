@@ -1,18 +1,72 @@
 import json
+import os
+import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 
 class ConfigStore:
     """Handles reading and writing lightweight configuration for the client."""
 
     CONFIG_FILENAME = "config.json"
+    LEGACY_DIR = Path.home() / "AppData" / "Roaming" / "PlexWxClient"
+
     def __init__(self) -> None:
-        self._config_dir = Path(__file__).resolve().parent.parent
+        self._config_dir = self._resolve_config_dir()
         self._config_path = self._config_dir / self.CONFIG_FILENAME
         self._data: Dict[str, Any] = {}
         self._loaded = False
+        self._migrate_legacy_config()
+
+    def _resolve_config_dir(self) -> Path:
+        candidates = list(self._iter_candidate_dirs())
+        for candidate in candidates:
+            config_path = candidate / self.CONFIG_FILENAME
+            if config_path.exists():
+                return candidate
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except OSError:
+                continue
+        fallback = Path.cwd()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+    def _iter_candidate_dirs(self) -> Iterable[Path]:
+        override = os.environ.get("PLEXIBLE_CONFIG_DIR")
+        if override:
+            yield Path(override).resolve()
+        script_path = self._script_directory()
+        if script_path:
+            yield script_path
+        package_dir = Path(__file__).resolve().parent.parent
+        yield package_dir
+
+    def _script_directory(self) -> Optional[Path]:
+        try:
+            if getattr(sys, "frozen", False):  # support PyInstaller-style bundles
+                return Path(sys.executable).resolve().parent
+            if sys.argv:
+                return Path(sys.argv[0]).resolve().parent
+        except Exception:
+            return None
+        return None
+
+    def _migrate_legacy_config(self) -> None:
+        legacy_path = self.LEGACY_DIR / self.CONFIG_FILENAME
+        if not legacy_path.exists():
+            return
+        if self._config_path.exists():
+            return
+        try:
+            legacy_data = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        self._config_path.write_text(json.dumps(legacy_data, indent=2), encoding="utf-8")
 
     @property
     def data(self) -> Dict[str, Any]:
