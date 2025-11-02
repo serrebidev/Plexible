@@ -93,6 +93,7 @@ class ConfigStore:
             "auth_token": None,
             "selected_server": None,
             "vlc_path": None,
+            "pending_progress": {},
         }
 
     def _load_from_disk(self) -> Dict[str, Any]:
@@ -147,3 +148,32 @@ class ConfigStore:
             self.set("vlc_path", path)
         else:
             self.clear("vlc_path")
+
+    def get_pending_progress(self) -> Dict[str, Dict[str, int]]:
+        stored = self.get("pending_progress", {})
+        if isinstance(stored, dict):
+            return {str(k): dict(v) for k, v in stored.items() if isinstance(v, dict)}
+        return {}
+
+    def get_pending_entry(self, rating_key: str) -> Dict[str, int]:
+        progress = self.get_pending_progress()
+        return progress.get(str(rating_key), {})
+
+    def upsert_pending_progress(self, rating_key: str, position: int, duration: int, state: str = "playing") -> None:
+        progress = self.get_pending_progress()
+        progress[str(rating_key)] = {
+            "position": int(max(0, position)),
+            "duration": int(max(0, duration)),
+            "state": state,
+        }
+        self.set("pending_progress", progress)
+
+    def remove_pending_progress(self, rating_key: str) -> None:
+        progress = self.get_pending_progress()
+        if str(rating_key) in progress:
+            del progress[str(rating_key)]
+            self.set("pending_progress", progress)
+
+    def clear_pending_progress(self) -> None:
+        self.set("pending_progress", {})
+

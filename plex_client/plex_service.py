@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Sequence
+import time
+from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from plexapi.base import PlexObject
@@ -22,6 +23,7 @@ class PlayableMedia:
     key: str
     stream_url: str
     browser_url: Optional[str]
+    resume_offset: int
     item: PlexObject
 
 
@@ -72,9 +74,14 @@ class PlexService:
             if not servers:
                 raise RuntimeError("No Plex servers are available for this account.")
             target = servers[0]
-        self._server = target.connect(ssl=True)
-        self._current_resource_id = target.clientIdentifier
-        self._config.set_selected_server(target.clientIdentifier)
+        return self.connect_resource(target)
+
+    def connect_resource(self, resource: MyPlexResource) -> PlexServer:
+        if resource not in self._resources:
+            self._resources.append(resource)
+        self._server = resource.connect(ssl=True)
+        self._current_resource_id = resource.clientIdentifier
+        self._config.set_selected_server(resource.clientIdentifier)
         return self._server
 
     def ensure_server(self) -> PlexServer:
@@ -136,12 +143,14 @@ class PlexService:
         browser_url = fallback_url or direct_url
         if not stream_url:
             return None
+        resume_offset = int(getattr(node, "viewOffset", 0) or 0)
         return PlayableMedia(
             title=title,
             media_type=media_type,
             key=node.key,
             stream_url=stream_url,
             browser_url=browser_url,
+            resume_offset=resume_offset,
             item=node,
         )
 
@@ -149,6 +158,7 @@ class PlexService:
         server = self.ensure_server()
         direct_url: Optional[str] = None
         fallback_url: Optional[str] = None
+        resume_offset = int(getattr(node, "viewOffset", 0) or 0)
 
         media = getattr(node, "media", None)
         if media:
@@ -165,7 +175,7 @@ class PlexService:
 
         if hasattr(node, "getStreamURL"):
             try:
-                fallback_url = node.getStreamURL()
+                fallback_url = node.getStreamURL(offset=resume_offset)
             except Exception:  # noqa: BLE001 - best effort, continue to other fallbacks
                 fallback_url = None
 
@@ -210,6 +220,168 @@ class PlexService:
             return []
         server = self.ensure_server()
         return server.search(query, limit=limit)
+
+    def fetch_item(self, rating_key: str) -> PlexObject:
+        server = self.ensure_server()
+        return server.fetchItem(f"/library/metadata/{rating_key}")
+
+    def update_progress_by_key(self, rating_key: str, position: int, duration: int, state: str = "stopped") -> tuple[str, int]:
+        item = self.fetch_item(rating_key)
+        media = PlayableMedia(
+            title=getattr(item, "title", str(item)),
+            media_type=getattr(item, "type", "unknown"),
+            key=item.key,
+            stream_url="",
+            browser_url=None,
+            resume_offset=int(getattr(item, "viewOffset", 0) or 0),
+            item=item,
+        )
+        return self.update_timeline(media, state, position, duration)
+
+    def watch_queues(
+        self,
+        continue_limit: int = 25,
+        up_next_limit: int = 25,
+    ) -> Tuple[List[PlayableMedia], List[PlayableMedia]]:
+        server = self.ensure_server()
+        try:
+            deck = list(server.library.onDeck())
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Unable to load Plex queues: {exc}") from exc
+        continue_items: List[PlayableMedia] = []
+        up_next_items: List[PlayableMedia] = []
+        seen_continue: Set[str] = set()
+        seen_upnext: Set[str] = set()
+        for item in deck:
+            rating_key = getattr(item, "ratingKey", None)
+            if not rating_key:
+                continue
+            view_offset = int(getattr(item, "viewOffset", 0) or 0)
+            duration = int(getattr(item, "duration", 0) or 0)
+            playable = self.to_playable(item)
+            if (
+                view_offset > 0
+                and duration > 0
+                and len(continue_items) < continue_limit
+                and rating_key not in seen_continue
+                and playable
+            ):
+                continue_items.append(playable)
+                seen_continue.add(rating_key)
+            if view_offset > 0 and duration > 0 and len(up_next_items) < up_next_limit:
+                next_item = self._determine_up_next(item)
+                if next_item:
+                    next_key = getattr(next_item, "ratingKey", None)
+                    if (
+                        next_key
+                        and next_key not in seen_upnext
+                    ):
+                        next_playable = self.to_playable(next_item)
+                        if next_playable:
+                            up_next_items.append(next_playable)
+                            seen_upnext.add(next_key)
+                continue
+            if playable and len(up_next_items) < up_next_limit and rating_key not in seen_upnext:
+                up_next_items.append(playable)
+                seen_upnext.add(rating_key)
+            if len(continue_items) >= continue_limit and len(up_next_items) >= up_next_limit:
+                break
+        return continue_items, up_next_items
+
+    def _determine_up_next(self, item: PlexObject) -> Optional[PlexObject]:
+        show_attr = getattr(item, "show", None)
+        show = None
+        if callable(show_attr):
+            try:
+                show = show_attr()
+            except Exception:
+                show = None
+        elif show_attr is not None:
+            show = show_attr
+        if show is None:
+            return None
+        try:
+            next_item = show.onDeck()
+        except Exception:
+            return None
+        if not next_item:
+            return None
+        if getattr(next_item, "ratingKey", None) == getattr(item, "ratingKey", None):
+            return None
+        return next_item
+
+    def update_timeline(self, media: PlayableMedia, state: str, position: int, duration: int) -> tuple[str, int]:
+        item = media.item
+        bounded_duration = max(0, duration or int(getattr(item, "duration", 0) or 0))
+        if bounded_duration == 0:
+            try:
+                item.reload()
+                bounded_duration = max(0, int(getattr(item, "duration", 0) or 0))
+            except Exception:
+                bounded_duration = 0
+        bounded_position = max(0, min(position, bounded_duration if bounded_duration else position))
+        if bounded_duration and bounded_position > bounded_duration:
+            bounded_position = bounded_duration
+        if bounded_position == 0 and media.resume_offset:
+            bounded_position = media.resume_offset
+        near_completion = False
+        send_state = state
+        if state == "stopped" and bounded_duration:
+            if bounded_position >= int(bounded_duration * 0.98):
+                near_completion = True
+            else:
+                send_state = "paused"
+        try:
+            item.updateTimeline(bounded_position, state=send_state, duration=bounded_duration)
+            if bounded_position > 0 and bounded_duration:
+                progress_state = "stopped" if state == "stopped" else send_state
+                try:
+                    item.updateProgress(bounded_position, state=progress_state)
+                except Exception as exc:
+                    print(f"[Timeline] Failed to update progress: {exc}")
+            media.resume_offset = bounded_position
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Timeline] Failed to update timeline: {exc}")
+        if near_completion:
+            try:
+                mark = getattr(item, "markWatched", None)
+                if callable(mark):
+                    mark()
+            except Exception:
+                pass
+        tolerance = 1250
+        confirm_deadline = time.time() + 8.0
+        server_offset = 0
+        while True:
+            try:
+                item.reload()
+            except Exception:
+                server_offset = int(getattr(item, "viewOffset", media.resume_offset) or media.resume_offset or 0)
+                break
+            server_offset = int(getattr(item, "viewOffset", media.resume_offset) or media.resume_offset or 0)
+            target = max(0, bounded_position - tolerance)
+            if (
+                bounded_position <= 0
+                or send_state == "playing"
+                or server_offset >= target
+                or time.time() >= confirm_deadline
+            ):
+                break
+            remaining = max(0.0, confirm_deadline - time.time())
+            wait_for = min(0.5, remaining) or 0.05
+            if state == "stopped" and bounded_position > 0 and send_state != "stopped":
+                try:
+                    item.updateProgress(bounded_position, state="stopped")
+                except Exception:
+                    pass
+            print(
+                f"[Timeline] Awaiting server offset update: local={bounded_position} server={server_offset} "
+                f"(target>={target})"
+            )
+            time.sleep(wait_for)
+        if server_offset > 0:
+            media.resume_offset = server_offset
+        return send_state, server_offset
 
     def search_all_servers(
         self,

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ctypes
-import html
 import importlib
 import os
-import subprocess
+import shutil
+import zipfile
+import struct
 import sys
 from pathlib import Path
 from shutil import which
@@ -12,12 +13,66 @@ from typing import Callable, Optional, Tuple
 
 import requests
 import wx
-import wx.html2 as webview
 
 from ..config import ConfigStore
 from ..plex_service import PlayableMedia
 
 _LIBVLC_BOOTSTRAPPED = False
+_PORTABLE_VLC_VERSION = "3.0.20"
+_PORTABLE_VLC_URLS = {
+    "win32": f"https://get.videolan.org/vlc/{_PORTABLE_VLC_VERSION}/win32/vlc-{_PORTABLE_VLC_VERSION}-win32.zip",
+    "win64": f"https://get.videolan.org/vlc/{_PORTABLE_VLC_VERSION}/win64/vlc-{_PORTABLE_VLC_VERSION}-win64.zip",
+}
+
+
+def _portable_vlc_base_dir() -> Path:
+    if not sys.platform.startswith("win"):
+        return Path()
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "Plexible" / "vlc"
+    return Path.home() / ".plexible" / "vlc"
+
+
+def _locate_extracted_libvlc(root: Path) -> Optional[Path]:
+    for candidate in root.rglob("libvlc.dll"):
+        return candidate.parent
+    return None
+
+
+def _ensure_portable_vlc(arch: str) -> Optional[Path]:
+    if arch not in _PORTABLE_VLC_URLS:
+        return None
+    base_dir = _portable_vlc_base_dir()
+    if not base_dir:
+        return None
+    target_dir = base_dir / arch / f"vlc-{_PORTABLE_VLC_VERSION}-{arch}"
+    lib_dir = _locate_extracted_libvlc(target_dir) if target_dir.exists() else None
+    if lib_dir and (lib_dir / "libvlc.dll").exists():
+        return lib_dir
+    url = _PORTABLE_VLC_URLS[arch]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp_zip = target_dir / "vlc.zip"
+    try:
+        print(f"[LibVLC] Downloading portable VLC ({arch})...")
+        with requests.get(url, stream=True, timeout=30) as resp:
+            resp.raise_for_status()
+            with tmp_zip.open("wb") as fp:
+                shutil.copyfileobj(resp.raw, fp)
+        with zipfile.ZipFile(tmp_zip) as archive:
+            archive.extractall(target_dir)
+        lib_dir = _locate_extracted_libvlc(target_dir)
+        if lib_dir and (lib_dir / "libvlc.dll").exists():
+            return lib_dir
+    except Exception as exc:  # noqa: BLE001
+        print(f"[LibVLC] Portable VLC download failed: {exc}")
+    finally:
+        if tmp_zip.exists():
+            try:
+                tmp_zip.unlink()
+            except Exception:
+                pass
+    return None
 
 
 def _ensure_dll_directory(path: Path) -> None:
@@ -46,6 +101,7 @@ def _bootstrap_libvlc_environment() -> None:
                 base = os.environ.get(env_var)
                 if base:
                     candidates.append(Path(base) / "VideoLAN" / "VLC")
+        selected_dir: Optional[Path] = None
         for candidate in candidates:
             candidate = candidate.resolve()
             if candidate.is_file():
@@ -54,13 +110,21 @@ def _bootstrap_libvlc_environment() -> None:
                 (candidate / "libvlc.dll").exists()
                 or (candidate / "libvlccore.dll").exists()
             ):
-                os.environ.setdefault("PYTHON_VLC_MODULE_PATH", str(candidate))
-                _ensure_dll_directory(candidate)
+                selected_dir = candidate
                 break
+        if selected_dir is None and os.name == "nt":
+            arch = "win64" if struct.calcsize("P") == 8 else "win32"
+            portable_dir = _ensure_portable_vlc(arch)
+            if portable_dir and (portable_dir / "libvlc.dll").exists():
+                selected_dir = portable_dir
+        if selected_dir:
+            os.environ.setdefault("PYTHON_VLC_MODULE_PATH", str(selected_dir))
+            _ensure_dll_directory(selected_dir)
     _LIBVLC_BOOTSTRAPPED = True
 
 
 requests.packages.urllib3.disable_warnings()
+os.environ.setdefault("VLC_VERBOSE", "-1")
 
 _bootstrap_libvlc_environment()
 try:  # pragma: no cover - python-vlc is optional at import time
@@ -73,9 +137,7 @@ PlaybackState = dict[str, object]
 
 
 class PlaybackPanel(wx.Panel):
-    """Playback surface supporting embedded LibVLC with rich controls and fallbacks."""
-
-    PLAYER_CHOICES = ["Auto", "LibVLC", "Browser", "VLC", "MPC"]
+    """Playback surface using LibVLC with automatic native fallbacks."""
 
     def __init__(self, parent: wx.Window, config: ConfigStore) -> None:
         super().__init__(parent)
@@ -84,20 +146,26 @@ class PlaybackPanel(wx.Panel):
         self._direct_url: Optional[str] = None
         self._browser_url: Optional[str] = None
         self._mode: str = "stopped"
-        self._last_preference: str = "Auto"
         self._is_paused: bool = False
-        self._browser_controlled: bool = False
         self._volume: int = 80
         self._muted: bool = False
         self._state_listener: Optional[Callable[[PlaybackState], None]] = None
+        self._timeline_callback: Optional[Callable[[PlayableMedia, str, int, int, bool], None]] = None
+        self._timeline_timer: Optional[wx.CallLater] = None
+        self._last_timeline_state: Optional[str] = None
+        self._last_timeline_position: int = 0
+        self._resume_offset: int = 0
+        self._resume_applied: bool = False
+        self._fullscreen: bool = False
+        self._fullscreen_frame: Optional[wx.Frame] = None
+        self._fullscreen_video_panel: Optional[wx.Panel] = None
+        self._active_video_window: wx.Window
 
         self._vlc_instance: Optional["vlc.Instance"] = None
         self._vlc_player: Optional["vlc.MediaPlayer"] = None
         self._vlc_check: Optional[wx.CallLater] = None
         self._vlc_notified_missing = False
         self._vlc_path_cache: Optional[str] = None
-        self._mpc_path_cache: Optional[str] = None
-        self._mpc_notified_missing = False
         self._libvlc_env_prepared = False
         self._libvlc_warning_shown = False
         self._libvlc_candidates: list[str] = []
@@ -105,35 +173,31 @@ class PlaybackPanel(wx.Panel):
         self._libvlc_active_source: Optional[str] = None
         self._libvlc_check_attempts = 0
         self._libvlc_max_start_checks = 4
+        self._vlc_event_manager: Optional["vlc.EventManager"] = None
+        self._vlc_error_callback: Optional[Callable[[object], None]] = None
 
         self._header = wx.StaticText(self, label="Nothing is playing.")
         header_font = self._header.GetFont()
         header_font.SetPointSize(header_font.GetPointSize() + 1)
         self._header.SetFont(header_font)
 
-        # Top row: player preference + open externally
-        preference_bar = wx.BoxSizer(wx.HORIZONTAL)
-        preference_bar.Add(wx.StaticText(self, label="Player:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self._mode_selector = wx.Choice(self, choices=self.PLAYER_CHOICES)
-        self._mode_selector.SetSelection(0)
-        self._mode_selector.Bind(wx.EVT_CHOICE, self._handle_player_choice)
-        preference_bar.Add(self._mode_selector, 0, wx.ALIGN_CENTER_VERTICAL)
-        preference_bar.AddStretchSpacer()
-        self._external_btn = wx.Button(self, label="Open Stream Externally")
-        self._external_btn.Enable(False)
-        self._external_btn.Bind(wx.EVT_BUTTON, self._open_stream_externally)
-        preference_bar.Add(self._external_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        header_row = wx.BoxSizer(wx.HORIZONTAL)
+        header_row.Add(self._header, 1, wx.ALIGN_CENTER_VERTICAL)
 
-        # Second row: transport controls + volume
+        # Transport controls + volume
         controls_bar = wx.BoxSizer(wx.HORIZONTAL)
-        self._play_btn = wx.Button(self, label="Play")
-        self._pause_btn = wx.Button(self, label="Pause")
-        self._stop_btn = wx.Button(self, label="Stop")
-        self._mute_btn = wx.ToggleButton(self, label="Mute")
+        self._play_btn = wx.Button(self, wx.ID_APPLY, label="Play")
+        self._pause_btn = wx.Button(self, wx.ID_ANY, label="Pause")
+        self._stop_btn = wx.Button(self, wx.ID_STOP, label="Stop")
+        self._mute_btn = wx.ToggleButton(self, wx.ID_ANY, label="Mute")
         self._play_btn.Bind(wx.EVT_BUTTON, self._on_play_clicked)
+        self._play_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_play_char)
         self._pause_btn.Bind(wx.EVT_BUTTON, self._on_pause_clicked)
+        self._pause_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_pause_char)
         self._stop_btn.Bind(wx.EVT_BUTTON, self._on_stop_clicked)
+        self._stop_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_stop_char)
         self._mute_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_mute_toggled)
+        self._mute_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_mute_char)
         controls_bar.Add(self._play_btn, 0, wx.RIGHT, 4)
         controls_bar.Add(self._pause_btn, 0, wx.RIGHT, 4)
         controls_bar.Add(self._stop_btn, 0, wx.RIGHT, 12)
@@ -144,21 +208,23 @@ class PlaybackPanel(wx.Panel):
         controls_bar.Add(self._volume_slider, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         self._volume_label = wx.StaticText(self, label="")
         controls_bar.Add(self._volume_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self._fullscreen_btn = wx.ToggleButton(self, wx.ID_ANY, label="Fullscreen")
+        self._fullscreen_btn.Enable(False)
+        self._fullscreen_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_fullscreen_toggled)
+        self._fullscreen_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_fullscreen_char)
+        controls_bar.Add(self._fullscreen_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         controls_bar.AddStretchSpacer()
 
         self._video_panel = wx.Panel(self)
         self._video_panel.SetBackgroundColour(wx.BLACK)
-        self._browser = webview.WebView.New(self)
+        self._active_video_window = self._video_panel
 
         layout = wx.BoxSizer(wx.VERTICAL)
-        layout.Add(preference_bar, 0, wx.ALL | wx.EXPAND, 6)
-        layout.Add(self._header, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
+        layout.Add(header_row, 0, wx.ALL | wx.EXPAND, 6)
         layout.Add(controls_bar, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
-        layout.Add(self._video_panel, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        layout.Add(self._browser, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+        layout.Add(self._video_panel, 1, wx.EXPAND | wx.ALL, 6)
         self.SetSizer(layout)
 
-        self._show_libvlc(False)
         self._update_controls_enabled()
         self._update_volume_controls()
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
@@ -180,80 +246,65 @@ class PlaybackPanel(wx.Panel):
             "can_volume": self._volume_control_available(),
             "muted": self._muted,
             "volume": self._volume,
+            "fullscreen": self._fullscreen,
         }
 
     def play(self, media: PlayableMedia) -> str:
-        """Play the provided media according to the active preference."""
+        """Play the provided media using LibVLC with automatic fallbacks."""
+        if self._current:
+            snapshot_pos = self._current_position()
+            snapshot_dur = self._current_duration()
+            if snapshot_dur > 0:
+                self._notify_timeline_state("stopped", snapshot_pos, snapshot_dur, sync=True)
         self._halt_current_playback()
 
         self._current = media
         self._direct_url = media.stream_url
         self._browser_url = media.browser_url or media.stream_url
-        self._external_btn.Enable(True)
         self._is_paused = False
-
-        preference = self._mode_selector.GetStringSelection() if self._mode_selector else "Auto"
-        self._last_preference = preference
+        self._resume_offset = max(0, int(getattr(media, "resume_offset", 0) or 0))
+        self._resume_applied = self._resume_offset == 0
 
         print(
-            "[Playback] Requested stream via "
-            f"{preference} -> direct={self._direct_url} browser={self._browser_url}"
+            "[Playback] Requested stream -> "
+            f"direct={self._direct_url} fallback={self._browser_url}"
         )
 
-        if preference == "LibVLC":
-            mode = self._play_with_libvlc(force_message=True)
-            if mode == "none":
-                mode = self._play_with_browser()
-            self._set_mode(mode)
-            return mode
-
-        if preference == "Browser":
-            mode = self._play_with_browser()
-            self._set_mode(mode)
-            return mode
-
-        if preference == "VLC":
-            mode = self._launch_vlc_app(force_message=True)
-            if mode == "none":
-                mode = self._play_with_browser()
-            self._set_mode(mode)
-            return mode
-
-        if preference == "MPC":
-            mode = self._play_with_mpc(force_message=True)
-            if mode == "none":
-                mode = self._play_with_browser()
-            self._set_mode(mode)
-            return mode
-
-        # Auto preference: LibVLC -> external VLC -> MPC -> Browser
         mode = self._play_with_libvlc()
-        if mode != "none":
+        if mode == "libvlc":
             self._set_mode(mode)
+            self._handle_playback_start(mode)
             return mode
-        mode = self._launch_vlc_app()
-        if mode != "none":
-            self._set_mode(mode)
-            return mode
-        mode = self._play_with_mpc()
-        if mode != "none":
-            self._set_mode(mode)
-            return mode
-        mode = self._play_with_browser()
-        self._set_mode(mode)
-        return mode
+
+        self._header.SetLabel("Unable to start playback for this item.")
+        wx.MessageBox(
+            "Plexible could not start LibVLC playback for this item.",
+            "Plexible",
+            wx.ICON_WARNING | wx.OK,
+            parent=self,
+        )
+        self._set_mode("stopped")
+        self._notify_timeline_reset()
+        self._current = None
+        self._direct_url = None
+        self._browser_url = None
+        return "none"
 
     def stop(self) -> None:
         if self._mode == "stopped" and not self._current:
             return
+        final_position = self._current_position()
+        duration = self._current_duration()
+        self._notify_timeline_state("stopped", final_position, duration, sync=True)
         self._halt_current_playback()
         self._current = None
         self._direct_url = None
         self._browser_url = None
-        self._browser_controlled = False
         self._is_paused = False
+        self._resume_offset = 0
+        self._resume_applied = False
+        self._pre_fullscreen_focus: Optional[wx.Window] = None
         self._header.SetLabel("Nothing is playing.")
-        self._external_btn.Enable(False)
         self._set_mode("stopped")
 
     def resume(self) -> bool:
@@ -263,10 +314,12 @@ class PlaybackPanel(wx.Panel):
             self._vlc_player.set_pause(False)
             self._is_paused = False
             self._header.SetLabel(f"Playing (LibVLC): {self._current.title}")
-        elif self._mode == "browser" and self._browser_controlled:
-            self._run_browser_script("var p=document.getElementById('player'); if(p){p.play();}")
-            self._is_paused = False
-            self._header.SetLabel(f"Playing (Browser): {self._current.title}")
+            self._start_timeline_poll()
+            try:
+                position = int(self._vlc_player.get_time())
+            except Exception:
+                position = 0
+            self._notify_timeline_state("playing", position, self._current_duration())
         else:
             return False
         self._notify_state()
@@ -279,10 +332,12 @@ class PlaybackPanel(wx.Panel):
             self._vlc_player.set_pause(True)
             self._is_paused = True
             self._header.SetLabel(f"Paused (LibVLC): {self._current.title}")
-        elif self._mode == "browser" and self._browser_controlled:
-            self._run_browser_script("var p=document.getElementById('player'); if(p){p.pause();}")
-            self._is_paused = True
-            self._header.SetLabel(f"Paused (Browser): {self._current.title}")
+            try:
+                position = int(self._vlc_player.get_time())
+            except Exception:
+                position = 0
+            self._cancel_timeline_poll()
+            self._notify_timeline_state("paused", position, self._current_duration())
         else:
             return False
         self._notify_state()
@@ -300,14 +355,20 @@ class PlaybackPanel(wx.Panel):
         if self._mode == "libvlc" and self._vlc_player:
             self._vlc_player.audio_set_mute(self._muted)
             applied = True
-        elif self._mode == "browser" and self._browser_controlled:
-            self._run_browser_script(
-                f"var p=document.getElementById('player'); if(p){{p.muted={'true' if self._muted else 'false'};}}"
-            )
-            applied = True
         self._update_volume_controls()
         self._notify_state()
         return applied
+
+    def is_fullscreen(self) -> bool:
+        return self._fullscreen
+
+    def set_fullscreen(self, desired: bool) -> bool:
+        if desired:
+            return self._enter_fullscreen()
+        return self._exit_fullscreen()
+
+    def toggle_fullscreen(self) -> bool:
+        return self.set_fullscreen(not self._fullscreen)
 
     def adjust_volume(self, delta: int) -> bool:
         return self.set_volume(self._volume + delta)
@@ -322,12 +383,6 @@ class PlaybackPanel(wx.Panel):
             self._vlc_player.audio_set_volume(value)
             self._vlc_player.audio_set_mute(self._muted)
             applied = True
-        elif self._mode == "browser" and self._browser_controlled:
-            vol = value / 100
-            self._run_browser_script(
-                f"var p=document.getElementById('player'); if(p){{p.volume={vol}; p.muted={'true' if self._muted else 'false'};}}"
-            )
-            applied = True
         if update_slider:
             self._volume_slider.SetValue(self._volume)
         self._update_volume_controls()
@@ -335,11 +390,6 @@ class PlaybackPanel(wx.Panel):
         return applied
 
     # ----------------------------------------------------------------- Event handlers
-
-    def _handle_player_choice(self, _: wx.CommandEvent) -> None:
-        self._last_preference = self._mode_selector.GetStringSelection() if self._mode_selector else "Auto"
-        if self._current:
-            self.play(self._current)
 
     def _open_stream_externally(self, _: wx.CommandEvent) -> None:
         url = self._direct_url or self._browser_url
@@ -352,6 +402,41 @@ class PlaybackPanel(wx.Panel):
             )
             return
         wx.LaunchDefaultBrowser(url)
+
+    def _handle_play_char(self, event: wx.KeyEvent) -> None:
+        self._handle_button_char(event, self._on_play_clicked, self._play_btn)
+
+    def _handle_pause_char(self, event: wx.KeyEvent) -> None:
+        self._handle_button_char(event, self._on_pause_clicked, self._pause_btn)
+
+    def _handle_stop_char(self, event: wx.KeyEvent) -> None:
+        self._handle_button_char(event, self._on_stop_clicked, self._stop_btn)
+
+    def _handle_mute_char(self, event: wx.KeyEvent) -> None:
+        self._handle_toggle_char(event, self._mute_btn, self._on_mute_toggled)
+
+    def _handle_fullscreen_char(self, event: wx.KeyEvent) -> None:
+        self._handle_toggle_char(event, self._fullscreen_btn, self._on_fullscreen_toggled)
+
+    def _handle_button_char(self, event: wx.KeyEvent, handler: Callable[[wx.CommandEvent], None], control: wx.Control) -> None:
+        code = event.GetKeyCode()
+        if code in (wx.WXK_SPACE, wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            evt = wx.CommandEvent(wx.EVT_BUTTON.typeId, control.GetId())
+            evt.SetEventObject(control)
+            handler(evt)
+            return
+        event.Skip()
+
+    def _handle_toggle_char(self, event: wx.KeyEvent, control: wx.ToggleButton, handler: Callable[[wx.CommandEvent], None]) -> None:
+        code = event.GetKeyCode()
+        if code in (wx.WXK_SPACE, wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            control.SetValue(not control.GetValue())
+            evt = wx.CommandEvent(wx.EVT_TOGGLEBUTTON.typeId, control.GetId())
+            evt.SetInt(1 if control.GetValue() else 0)
+            evt.SetEventObject(control)
+            handler(evt)
+            return
+        event.Skip()
 
     def _on_play_clicked(self, _: wx.CommandEvent) -> None:
         if not self.resume():
@@ -373,6 +458,12 @@ class PlaybackPanel(wx.Panel):
         else:
             self._update_volume_controls()
 
+    def _on_fullscreen_toggled(self, event: wx.CommandEvent) -> None:
+        desired = bool(event.IsChecked())
+        if not self.set_fullscreen(desired):
+            self._fullscreen_btn.SetValue(self._fullscreen)
+            wx.Bell()
+
     def _on_volume_slider(self, _: wx.CommandEvent) -> None:
         self.set_volume(self._volume_slider.GetValue(), update_slider=False)
 
@@ -384,12 +475,43 @@ class PlaybackPanel(wx.Panel):
 
     def _stop_libvlc_only(self) -> None:
         self._cancel_libvlc_timer()
+        self._detach_libvlc_events()
         if self._vlc_player:
             try:
                 self._vlc_player.stop()
             except Exception:
                 pass
         self._libvlc_check_attempts = 0
+
+    def _attach_libvlc_events(self) -> None:
+        if self._vlc_player is None or vlc is None:
+            return
+        try:
+            manager = self._vlc_player.event_manager()
+        except Exception:
+            return
+        self._detach_libvlc_events()
+        self._vlc_event_manager = manager
+        if self._vlc_error_callback is None:
+            def _callback(event: object) -> None:
+                self._on_libvlc_error(event)
+            self._vlc_error_callback = _callback
+        try:
+            manager.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._vlc_error_callback)
+        except Exception:
+            pass
+
+    def _detach_libvlc_events(self) -> None:
+        if self._vlc_event_manager and self._vlc_error_callback and vlc is not None:
+            try:
+                self._vlc_event_manager.event_detach(vlc.EventType.MediaPlayerEncounteredError, self._vlc_error_callback)
+            except Exception:
+                pass
+        self._vlc_event_manager = None
+
+    def _on_libvlc_error(self, _event: object = None) -> None:
+        print("[LibVLC] Encountered playback error; stopping playback.")
+        wx.CallAfter(self._handle_libvlc_failure, "LibVLC reported an error while streaming.", False, True)
 
     def _clear_libvlc_candidates(self) -> None:
         self._libvlc_candidates = []
@@ -398,9 +520,10 @@ class PlaybackPanel(wx.Panel):
 
     def _halt_current_playback(self) -> None:
         self._stop_libvlc_only()
+        self._cancel_timeline_poll()
+        self._exit_fullscreen()
+        self._notify_timeline_reset()
         self._clear_libvlc_candidates()
-        self._browser.Stop()
-        self._show_libvlc(False)
 
     def _play_with_libvlc(self, force_message: bool = False) -> str:
         if not (self._direct_url or self._browser_url):
@@ -438,9 +561,6 @@ class PlaybackPanel(wx.Panel):
         if self._start_libvlc(stream_source):
             return "libvlc"
 
-        if self._attempt_libvlc_fallback():
-            return "libvlc"
-
         if force_message:
             wx.MessageBox(
                 "LibVLC was unable to start playback for this item.",
@@ -448,6 +568,7 @@ class PlaybackPanel(wx.Panel):
                 wx.ICON_WARNING | wx.OK,
                 parent=self,
             )
+        return "none"
         return "none"
 
     def _libvlc_reset_candidates(self) -> None:
@@ -482,7 +603,11 @@ class PlaybackPanel(wx.Panel):
         media = self._vlc_instance.media_new(stream_source)  # type: ignore[union-attr]
         if "m3u8" in stream_source.lower():
             media.add_option(":network-caching=2000")
+        if sys.platform.startswith("win"):
+            media.add_option(":audio-output=directsound")
         media.add_option(":http-user-agent=Plexible/1.0")
+        media.add_option(":no-video-title-show")
+        media.add_option(":no-osd")
         self._vlc_player.set_media(media)  # type: ignore[union-attr]
         self._libvlc_active_source = stream_source
         self._vlc_player.audio_set_volume(self._volume)  # type: ignore[union-attr]
@@ -491,8 +616,9 @@ class PlaybackPanel(wx.Panel):
         self._header.SetLabel(
             f"Playing (LibVLC){label_suffix}: {self._current.title if self._current else 'Media'}"
         )
-        self._browser_controlled = False
         self._show_libvlc(True)
+        self._resume_applied = self._resume_offset == 0
+        self._attach_libvlc_events()
         result = self._vlc_player.play()  # type: ignore[union-attr]
         if result == -1:
             print(f"[LibVLC] Failed to start {descriptor} stream (error code {result}).")
@@ -501,18 +627,6 @@ class PlaybackPanel(wx.Panel):
         self._libvlc_check_attempts = 0
         self._schedule_libvlc_check()
         return True
-
-    def _attempt_libvlc_fallback(self) -> bool:
-        self._stop_libvlc_only()
-        self._libvlc_active_source = None
-        while True:
-            next_source = self._libvlc_next_source()
-            if not next_source:
-                return False
-            descriptor = self._describe_stream_source(next_source)
-            print(f"[LibVLC] Retrying with {descriptor} stream.")
-            if self._start_libvlc(next_source):
-                return True
 
     def _probe_stream(self, url: str) -> bool:
         try:
@@ -528,139 +642,6 @@ class PlaybackPanel(wx.Panel):
         except requests.RequestException as exc:
             print(f"[LibVLC] Probe error for {self._describe_stream_source(url)} stream: {exc}")
             return False
-
-    def _play_with_browser(self) -> str:
-        self._show_libvlc(False)
-        title = self._current.title if self._current else "Media"
-        self._header.SetLabel(f"Playing (Browser): {title}")
-        url = self._browser_url
-        self._browser_controlled = False
-        if not url:
-            self._browser.SetPage(
-                "<html><body style='background:#111;color:#eee;font-family:sans-serif;padding:12px;'>"
-                "Unable to play this item."
-                "</body></html>",
-                "",
-            )
-        else:
-            element, mime = self._element_for_url(url)
-            if element in {"video", "audio"}:
-                self._browser_controlled = True
-                safe_url = html.escape(url, quote=True)
-                muted_attr = " muted" if self._muted else ""
-                volume_js = f"var p=document.getElementById('player'); if(p){{p.volume={self._volume/100};}}"
-                mute_js = "p.muted=true;" if self._muted else "p.muted=false;"
-                page = (
-                    "<html><body style='margin:0;background:#000;color:#fff;'>"
-                    f"<{element} id='player' src=\"{safe_url}\" type=\"{mime}\" controls autoplay{muted_attr} "
-                    "style=\"width:100%;height:100%;background:#000;\">"
-                    "Sorry, your system cannot play this stream."
-                    f"</{element}>"
-                    f"<script>{volume_js} var p=document.getElementById('player'); if(p){{{mute_js}}}</script>"
-                    "</body></html>"
-                )
-                self._browser.SetPage(page, "")
-            else:
-                self._browser.LoadURL(url)
-        if self._browser_controlled:
-            wx.CallLater(250, self._apply_browser_volume_settings)
-        return "browser"
-
-    def _launch_vlc_app(self, force_message: bool = False) -> str:
-        path = self._find_vlc()
-        if not path:
-            if force_message and not self._vlc_notified_missing:
-                wx.MessageBox(
-                    "VLC was not found. Install VLC or set the VLC_PATH environment variable.",
-                    "Plexible",
-                    wx.ICON_WARNING | wx.OK,
-                    parent=self,
-                )
-                self._vlc_notified_missing = True
-            return "none"
-        url = self._direct_url or self._browser_url
-        if not url:
-            if force_message:
-                wx.MessageBox(
-                    "No usable stream URL is available for external playback.",
-                    "Plexible",
-                    wx.ICON_WARNING | wx.OK,
-                    parent=self,
-                )
-            return "none"
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-            )
-        try:
-            subprocess.Popen(
-                [path, url, "--play-and-exit"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-            )
-        except Exception as exc:
-            if force_message:
-                wx.MessageBox(
-                    f"Failed to launch VLC.\n{exc}",
-                    "Plexible",
-                    wx.ICON_ERROR | wx.OK,
-                    parent=self,
-                )
-            return "none"
-        self._browser_controlled = False
-        self._header.SetLabel(f"Playing in VLC: {self._current.title if self._current else 'Media'}")
-        return "vlc"
-
-    def _play_with_mpc(self, force_message: bool = False) -> str:
-        path = self._find_mpc()
-        if not path:
-            if force_message and not self._mpc_notified_missing:
-                wx.MessageBox(
-                    "MPC-HC/BE was not found. Install MPC-HC (or set MPC_PATH) for this fallback.",
-                    "Plexible",
-                    wx.ICON_WARNING | wx.OK,
-                    parent=self,
-                )
-                self._mpc_notified_missing = True
-            return "none"
-        url = self._direct_url or self._browser_url
-        if not url:
-            if force_message:
-                wx.MessageBox(
-                    "No usable stream URL is available for external playback.",
-                    "Plexible",
-                    wx.ICON_WARNING | wx.OK,
-                    parent=self,
-                )
-            return "none"
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-            )
-        try:
-            subprocess.Popen(
-                [path, url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-            )
-        except Exception as exc:
-            if force_message:
-                wx.MessageBox(
-                    f"Failed to launch MPC.\n{exc}",
-                    "Plexible",
-                    wx.ICON_ERROR | wx.OK,
-                    parent=self,
-                )
-            return "none"
-        self._browser_controlled = False
-        self._header.SetLabel(f"Playing in MPC: {self._current.title if self._current else 'Media'}")
-        return "mpc"
-
-    # -------------------------------------------------------------- LibVLC support
 
     def _prepare_libvlc_environment(self, force: bool = False) -> None:
         if self._libvlc_env_prepared and not force:
@@ -682,6 +663,25 @@ class PlaybackPanel(wx.Panel):
         exe_path = self._find_vlc()
         if exe_path:
             candidates.append(Path(exe_path).parent)
+        if sys.platform.startswith("win"):
+            is_64bit = struct.calcsize("P") == 8
+            program_files = os.environ.get("ProgramFiles")
+            program_files_x86 = os.environ.get("ProgramFiles(x86)")
+            default_dirs: list[Path] = []
+            if is_64bit:
+                if program_files:
+                    default_dirs.append(Path(program_files) / "VideoLAN" / "VLC")
+                if program_files_x86:
+                    default_dirs.append(Path(program_files_x86) / "VideoLAN" / "VLC")
+            else:
+                if program_files_x86:
+                    default_dirs.append(Path(program_files_x86) / "VideoLAN" / "VLC")
+                if program_files:
+                    default_dirs.append(Path(program_files) / "VideoLAN" / "VLC")
+            for directory in default_dirs:
+                if directory and all(directory.resolve() != existing.resolve() for existing in candidates if existing):
+                    candidates.append(directory)
+        selected_dir: Optional[Path] = None
         for directory in candidates:
             if not directory:
                 continue
@@ -697,12 +697,19 @@ class PlaybackPanel(wx.Panel):
                 if not compatible:
                     print(f"[LibVLC] Skipping {directory}: {message}")
                     continue
-                os.environ["PYTHON_VLC_MODULE_PATH"] = str(directory)
-                exe = directory / "vlc.exe"
-                if exe.exists():
-                    os.environ.setdefault("VLC_PATH", str(exe))
-                _ensure_dll_directory(directory)
+                selected_dir = directory
                 break
+        if selected_dir is None and sys.platform.startswith("win"):
+            arch = "win64" if struct.calcsize("P") == 8 else "win32"
+            portable_dir = _ensure_portable_vlc(arch)
+            if portable_dir and (portable_dir / "libvlc.dll").exists():
+                selected_dir = portable_dir
+        if selected_dir:
+            os.environ["PYTHON_VLC_MODULE_PATH"] = str(selected_dir)
+            exe = selected_dir / "vlc.exe"
+            if exe.exists():
+                os.environ.setdefault("VLC_PATH", str(exe))
+            _ensure_dll_directory(selected_dir)
         self._libvlc_env_prepared = True
 
     def _ensure_libvlc(self) -> bool:
@@ -715,14 +722,20 @@ class PlaybackPanel(wx.Panel):
                 return False
         if self._vlc_instance is None or self._vlc_player is None:
             try:
-                self._vlc_instance = vlc.Instance()
+                instance_args = ["--no-video-title-show", "--quiet"]
+                if sys.platform.startswith("win"):
+                    instance_args.append("--aout=directsound")
+                self._vlc_instance = vlc.Instance(*instance_args)
                 self._vlc_player = self._vlc_instance.media_player_new()
             except Exception:
                 self._libvlc_env_prepared = False
                 self._prepare_libvlc_environment(force=True)
                 try:
                     vlc = importlib.reload(vlc)  # type: ignore[arg-type]
-                    self._vlc_instance = vlc.Instance()
+                    instance_args = ["--no-video-title-show", "--quiet"]
+                    if sys.platform.startswith("win"):
+                        instance_args.append("--aout=directsound")
+                    self._vlc_instance = vlc.Instance(*instance_args)
                     self._vlc_player = self._vlc_instance.media_player_new()
                 except Exception:
                     if self._prompt_for_vlc_path():
@@ -734,18 +747,31 @@ class PlaybackPanel(wx.Panel):
                             wx.ICON_WARNING | wx.OK,
                             parent=self,
                         )
-                        self._libvlc_warning_shown = True
+                    self._libvlc_warning_shown = True
                     self._vlc_instance = None
                     self._vlc_player = None
                     return False
-        handle = self._video_panel.GetHandle()
+        if self._vlc_player and sys.platform.startswith("win"):
+            try:
+                self._vlc_player.audio_output_set("directsound")
+            except Exception:
+                pass
+        self._update_vlc_drawable(self._active_video_window)
+        return True
+
+    def _update_vlc_drawable(self, window: Optional[wx.Window]) -> None:
+        if self._vlc_player is None or vlc is None or window is None:
+            return
+        try:
+            handle = window.GetHandle()
+        except Exception:
+            return
         if sys.platform.startswith("win"):
             self._vlc_player.set_hwnd(int(handle))  # type: ignore[union-attr]
         elif sys.platform.startswith("linux"):
             self._vlc_player.set_xwindow(int(handle))  # type: ignore[union-attr]
         elif sys.platform == "darwin":
             self._vlc_player.set_nsobject(int(handle))  # type: ignore[union-attr]
-        return True
 
     def _schedule_libvlc_check(self, delay: int = 3000) -> None:
         self._cancel_libvlc_timer()
@@ -766,6 +792,7 @@ class PlaybackPanel(wx.Panel):
         state = self._vlc_player.get_state()
         if state in (vlc.State.Playing, vlc.State.Paused):
             self._libvlc_check_attempts = 0
+            self._handle_playback_start("libvlc")
             return
         if state in (vlc.State.Opening, vlc.State.Buffering, vlc.State.NothingSpecial):
             if self._libvlc_check_attempts < self._libvlc_max_start_checks:
@@ -773,36 +800,33 @@ class PlaybackPanel(wx.Panel):
                 self._schedule_libvlc_check(2000)
                 return
         print(f"[LibVLC] Player state after launch: {state}")
-        if self._attempt_libvlc_fallback():
+        self._handle_libvlc_failure("LibVLC could not start playback.", False, True)
+
+    # ----------------------------------------------------------------- UI helpers
+
+    def _handle_libvlc_failure(self, reason: str, _allow_external: bool, alert_user: bool) -> None:
+        if not self._current:
             return
-        self._halt_current_playback()
-        if self._last_preference == "LibVLC":
+        print(f"[LibVLC] {reason}")
+        self._stop_libvlc_only()
+        self._exit_fullscreen()
+        self._libvlc_active_source = None
+        if alert_user:
             wx.MessageBox(
                 "LibVLC could not play this item.",
                 "Plexible",
                 wx.ICON_WARNING | wx.OK,
                 parent=self,
             )
-            mode = self._play_with_browser()
-            self._set_mode(mode)
-            return
-        # Auto fallback chain
-        mode = self._play_with_mpc()
-        if mode != "none":
-            self._set_mode(mode)
-            return
-        mode = self._launch_vlc_app()
-        if mode != "none":
-            self._set_mode(mode)
-            return
-        mode = self._play_with_browser()
-        self._set_mode(mode)
-
-    # ----------------------------------------------------------------- UI helpers
+        self._header.SetLabel("Unable to start playback.")
+        self._set_mode("stopped")
+        self._notify_timeline_reset()
 
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
-        if mode not in {"libvlc", "browser"}:
+        if mode != "libvlc" and self._fullscreen:
+            self._exit_fullscreen()
+        if mode != "libvlc":
             self._is_paused = False
         self._update_controls_enabled()
         self._update_volume_controls()
@@ -817,6 +841,8 @@ class PlaybackPanel(wx.Panel):
         self._stop_btn.Enable(has_media or self._mode != "stopped")
         self._mute_btn.Enable(can_volume)
         self._volume_slider.Enable(can_volume)
+        self._fullscreen_btn.Enable(self._mode == "libvlc")
+        self._fullscreen_btn.SetValue(self._fullscreen)
 
     def _update_volume_controls(self) -> None:
         self._mute_btn.SetValue(self._muted)
@@ -831,12 +857,242 @@ class PlaybackPanel(wx.Panel):
         state = self.get_state()
         wx.CallAfter(self._state_listener, state)
 
+    def set_timeline_callback(
+        self,
+        callback: Optional[Callable[[PlayableMedia, str, int, int, bool], None]],
+    ) -> None:
+        self._timeline_callback = callback
+
+    def _current_duration(self) -> int:
+        if not self._current:
+            return 0
+        duration = 0
+        if self._mode == "libvlc" and self._vlc_player:
+            try:
+                duration = int(self._vlc_player.get_length())
+            except Exception:
+                duration = 0
+        if not duration and getattr(self._current.item, "duration", None):
+            try:
+                duration = int(getattr(self._current.item, "duration", 0) or 0)
+            except Exception:
+                duration = 0
+        return max(0, duration)
+
+    def _current_position(self) -> int:
+        position = max(0, self._last_timeline_position)
+        if self._mode == "libvlc" and self._vlc_player:
+            try:
+                vlc_time = int(self._vlc_player.get_time())
+            except Exception:
+                vlc_time = 0
+            if vlc_time > position:
+                position = vlc_time
+        return position
+
+    def force_timeline_snapshot(self, sync: bool = True) -> None:
+        if not self._current:
+            return
+        position = self._current_position()
+        duration = self._current_duration()
+        self._notify_timeline_state("playing", position, duration, sync=sync)
+
+    def _handle_playback_start(self, mode: str) -> None:
+        if not self._current:
+            return
+        duration = self._current_duration()
+        if mode == "libvlc":
+            position = self._resume_offset or 0
+            if not position and self._vlc_player:
+                try:
+                    position = max(0, int(self._vlc_player.get_time()))
+                except Exception:
+                    position = 0
+            self._start_timeline_poll()
+            self._notify_timeline_state("playing", position, duration)
+            self._maybe_seek_to_resume(initial=True)
+        else:
+            self._cancel_timeline_poll()
+            position = 1000 if duration else 0
+            self._notify_timeline_state("playing", position, duration)
+
+    def _start_timeline_poll(self, delay_ms: int = 5000) -> None:
+        self._cancel_timeline_poll()
+        if self._mode != "libvlc":
+            return
+        self._timeline_timer = wx.CallLater(delay_ms, self._poll_timeline)
+
+    def _maybe_seek_to_resume(self, initial: bool = False) -> None:
+        if (
+            self._resume_applied
+            or not self._resume_offset
+            or self._mode != "libvlc"
+            or self._vlc_player is None
+            or vlc is None
+        ):
+            return
+        try:
+            state = self._vlc_player.get_state()
+        except Exception:
+            state = None
+        if state not in (vlc.State.Playing, vlc.State.Paused):
+            if initial:
+                wx.CallLater(300, self._maybe_seek_to_resume)
+            return
+        try:
+            self._vlc_player.set_time(self._resume_offset)
+            self._resume_applied = True
+            print(f"[LibVLC] Resume offset applied at {self._resume_offset} ms.")
+        except Exception as exc:
+            print(f"[LibVLC] Failed to apply resume offset: {exc}")
+        else:
+            self._resume_applied = True
+
+    def _enter_fullscreen(self) -> bool:
+        if self._fullscreen:
+            return True
+        if self._mode != "libvlc" or self._vlc_player is None or vlc is None or not self._current:
+            return False
+        if not self._ensure_libvlc():
+            return False
+        self._pre_fullscreen_focus = wx.Window.FindFocus()
+        frame = wx.Frame(
+            self.GetTopLevelParent(),
+            title=self._current.title if self._current else "Plexible",
+            style=wx.DEFAULT_FRAME_STYLE,
+        )
+        frame.SetBackgroundColour(wx.BLACK)
+        video_panel = wx.Panel(frame)
+        video_panel.SetBackgroundColour(wx.BLACK)
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(video_panel, 1, wx.EXPAND)
+        frame.SetSizer(frame_sizer)
+        frame.Bind(wx.EVT_CLOSE, self._on_fullscreen_close)
+        frame.Bind(wx.EVT_CHAR_HOOK, self._on_fullscreen_key)
+        frame.ShowFullScreen(True)
+        frame.Show()
+        frame.Raise()
+        frame.SetFocus()
+        video_panel.SetFocus()
+        self._pre_fullscreen_focus = wx.Window.FindFocus()
+        self._video_panel.Hide()
+        self.Layout()
+        self._fullscreen_frame = frame
+        self._fullscreen_video_panel = video_panel
+        self._fullscreen = True
+        self._active_video_window = video_panel
+        self._update_vlc_drawable(video_panel)
+        self._fullscreen_btn.SetValue(True)
+        self._update_controls_enabled()
+        self._notify_state()
+        self._maybe_seek_to_resume()
+        return True
+
+    def _exit_fullscreen(self) -> bool:
+        if not self._fullscreen:
+            return True
+        frame = self._fullscreen_frame
+        panel = self._fullscreen_video_panel
+        self._fullscreen_frame = None
+        self._fullscreen_video_panel = None
+        self._fullscreen = False
+        self._active_video_window = self._video_panel
+        self._update_vlc_drawable(self._video_panel)
+        self._video_panel.Show()
+        if self._pre_fullscreen_focus and self._pre_fullscreen_focus.IsOk():
+            wx.CallAfter(self._pre_fullscreen_focus.SetFocus)
+        self.SetFocus()
+        self.Layout()
+        if panel:
+            panel.Destroy()
+        if frame:
+            try:
+                frame.ShowFullScreen(False)
+            except Exception:
+                pass
+            frame.Destroy()
+        self._fullscreen_btn.SetValue(False)
+        self._update_controls_enabled()
+        self._notify_state()
+        return True
+
+    def _on_fullscreen_close(self, event: wx.CloseEvent) -> None:
+        self._exit_fullscreen()
+        event.Skip(False)
+
+    def _on_fullscreen_key(self, event: wx.KeyEvent) -> None:
+        code = event.GetKeyCode()
+        if code in (wx.WXK_ESCAPE, wx.WXK_F11):
+            self._exit_fullscreen()
+        else:
+            event.Skip()
+
+    def _cancel_timeline_poll(self) -> None:
+        if self._timeline_timer:
+            try:
+                self._timeline_timer.Stop()
+            except Exception:
+                pass
+        self._timeline_timer = None
+
+    def _poll_timeline(self) -> None:
+        self._timeline_timer = None
+        if not self._current or self._mode != "libvlc" or self._vlc_player is None or vlc is None:
+            return
+        try:
+            state = self._vlc_player.get_state()
+        except Exception:
+            state = None
+        try:
+            position = max(0, int(self._vlc_player.get_time()))
+        except Exception:
+            position = 0
+        duration = self._current_duration()
+        if state == vlc.State.Playing:
+            self._maybe_seek_to_resume()
+            self._notify_timeline_state("playing", position, duration)
+            self._start_timeline_poll()
+        elif state == vlc.State.Paused:
+            self._maybe_seek_to_resume()
+            self._notify_timeline_state("paused", position, duration)
+            self._start_timeline_poll()
+        elif state in (vlc.State.Ended, vlc.State.Stopped):
+            self._notify_timeline_state("stopped", duration or position, duration)
+            wx.CallAfter(self.stop)
+        elif state == vlc.State.Error:
+            self._notify_timeline_state("stopped", position, duration)
+            wx.CallAfter(self._handle_libvlc_failure, "LibVLC reported an error while streaming.", False, True)
+        else:
+            self._start_timeline_poll()
+
+    def _notify_timeline_state(self, state: str, position: int, duration: int, *, sync: bool = False) -> None:
+        if not self._timeline_callback or not self._current:
+            return
+        duration = max(0, duration or self._current_duration())
+        position = max(0, position)
+        if (
+            self._last_timeline_state == state
+            and abs(position - self._last_timeline_position) < 1500
+            and not sync
+        ):
+            return
+        self._last_timeline_state = state
+        self._last_timeline_position = position
+        try:
+            callback = self._timeline_callback
+            if sync:
+                callback(self._current, state, position, duration, True)
+            else:
+                wx.CallAfter(callback, self._current, state, position, duration, False)
+        except Exception:
+            pass
+
+    def _notify_timeline_reset(self) -> None:
+        self._last_timeline_state = None
+        self._last_timeline_position = 0
+
     def _show_libvlc(self, visible: bool) -> None:
         self._video_panel.Show(visible)
-        if visible:
-            self._browser.Hide()
-        else:
-            self._browser.Show()
         self.Layout()
 
     # -------------------------------------------------------------- Player discovery
@@ -856,51 +1112,44 @@ class PlaybackPanel(wx.Panel):
         which_path = which("vlc")
         if which_path:
             candidates.append(which_path)
-        candidates.extend(
-            [
-                r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-                r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-            ]
-        )
+        if sys.platform.startswith("win"):
+            is_64bit = struct.calcsize("P") == 8
+            program_files = os.environ.get("ProgramFiles")
+            program_files_x86 = os.environ.get("ProgramFiles(x86)")
+            default_paths: list[str] = []
+            if is_64bit:
+                if program_files:
+                    default_paths.append(str(Path(program_files) / "VideoLAN" / "VLC" / "vlc.exe"))
+                if program_files_x86:
+                    default_paths.append(str(Path(program_files_x86) / "VideoLAN" / "VLC" / "vlc.exe"))
+            else:
+                if program_files_x86:
+                    default_paths.append(str(Path(program_files_x86) / "VideoLAN" / "VLC" / "vlc.exe"))
+                if program_files:
+                    default_paths.append(str(Path(program_files) / "VideoLAN" / "VLC" / "vlc.exe"))
+            for path in default_paths:
+                if path not in candidates:
+                    candidates.append(path)
         for candidate in candidates:
             if not candidate:
                 continue
             path = Path(candidate)
-            if path.exists():
-                self._vlc_path_cache = str(path)
-                self._vlc_notified_missing = False
-                return self._vlc_path_cache
+            if not path.exists():
+                continue
+            valid = True
+            message: Optional[str] = None
+            try:
+                valid, message = self._validate_vlc_directory(path.parent)
+            except Exception:
+                valid = False
+            if not valid:
+                if message:
+                    print(f"[LibVLC] Skipping {path.parent}: {message}")
+                continue
+            self._vlc_path_cache = str(path)
+            self._vlc_notified_missing = False
+            return self._vlc_path_cache
         self._vlc_path_cache = None
-        return None
-
-    def _find_mpc(self) -> Optional[str]:
-        if self._mpc_path_cache is not None:
-            return self._mpc_path_cache
-        candidates = []
-        env_path = os.environ.get("MPC_PATH")
-        if env_path:
-            candidates.append(env_path)
-        for candidate in ("mpc-hc64", "mpc-hc", "mpc-be64", "mpc-be"):
-            which_path = which(candidate)
-            if which_path:
-                candidates.append(which_path)
-        candidates.extend(
-            [
-                r"C:\Program Files\MPC-HC\mpc-hc64.exe",
-                r"C:\Program Files (x86)\MPC-HC\mpc-hc.exe",
-                r"C:\Program Files\MPC-BE x64\mpc-be64.exe",
-                r"C:\Program Files (x86)\MPC-BE\mpc-be.exe",
-            ]
-        )
-        for candidate in candidates:
-            if not candidate:
-                continue
-            path = Path(candidate)
-            if path.exists():
-                self._mpc_path_cache = str(path)
-                self._mpc_notified_missing = False
-                return self._mpc_path_cache
-        self._mpc_path_cache = None
         return None
 
     # ------------------------------------------------------------------ Utility
@@ -914,10 +1163,16 @@ class PlaybackPanel(wx.Panel):
         if not dll.exists() or not core.exists():
             return False, "Selected folder does not contain libvlc.dll and libvlccore.dll."
         python_32 = sys.maxsize <= 2**32
+        python_64 = not python_32
         if python_32 and "Program Files (x86)" not in str(dir_path) and "Program Files" in str(dir_path):
             return (
                 False,
                 "This Python build is 32-bit. Please select the 32-bit VLC installation (Program Files (x86)\\VideoLAN\\VLC).",
+            )
+        if python_64 and "Program Files (x86)" in str(dir_path):
+            return (
+                False,
+                "This Python build is 64-bit. Please select the 64-bit VLC installation (Program Files\\VideoLAN\\VLC).",
             )
         return True, None
 
@@ -942,28 +1197,11 @@ class PlaybackPanel(wx.Panel):
         self._vlc_notified_missing = True
         return False
 
-    def _run_browser_script(self, script: str) -> None:
-        try:
-            self._browser.RunScript(script)
-        except Exception:
-            pass
-
-    def _apply_browser_volume_settings(self) -> None:
-        if not self._browser_controlled:
-            return
-        self._run_browser_script(
-            f"var p=document.getElementById('player'); if(p){{p.volume={self._volume/100}; p.muted={'true' if self._muted else 'false'};}}"
-        )
-
     def _can_control_transport(self) -> bool:
-        return self._current is not None and (
-            self._mode == "libvlc" or (self._mode == "browser" and self._browser_controlled)
-        )
+        return self._current is not None and self._mode == "libvlc"
 
     def _volume_control_available(self) -> bool:
-        return self._current is not None and (
-            self._mode == "libvlc" or (self._mode == "browser" and self._browser_controlled)
-        )
+        return self._current is not None and self._mode == "libvlc"
 
     def _is_libvlc_compatible(self, directory: Path) -> Tuple[bool, Optional[str]]:
         directory = directory.resolve()
@@ -976,21 +1214,3 @@ class PlaybackPanel(wx.Panel):
         except OSError as exc:
             return False, str(exc)
         return True, None
-
-    def _element_for_url(self, url: str) -> Tuple[str, str]:
-        lower = url.split("?", 1)[0].split("#", 1)[0].lower()
-        if lower.endswith((".mp3", ".aac", ".m4a", ".flac")):
-            return "audio", "audio/mpeg"
-        if lower.endswith(".wav"):
-            return "audio", "audio/wav"
-        if lower.endswith(".ogg"):
-            return "audio", "audio/ogg"
-        if lower.endswith((".mp4", ".m4v", ".mov")):
-            return "video", "video/mp4"
-        if lower.endswith(".webm"):
-            return "video", "video/webm"
-        if lower.endswith(".ogv"):
-            return "video", "video/ogg"
-        if lower.endswith(".m3u8"):
-            return "video", "application/vnd.apple.mpegurl"
-        return "unknown", ""

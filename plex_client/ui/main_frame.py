@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import threading
-from typing import Iterable, List, Optional
+import time
+from typing import Dict, Iterable, List, Optional
 
 import wx
 
@@ -18,6 +19,8 @@ class SearchResultsDialog(wx.Dialog):
     """Dialog that streams search results as they arrive."""
 
     def __init__(self, parent: wx.Window, query: str) -> None:
+        self._status_message = ""
+        self._status_bar: Optional[wx.StatusBar] = None
         super().__init__(parent, title=f"Search: {query}", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self._hits: List[SearchHit] = []
         self._errors: List[str] = []
@@ -118,7 +121,7 @@ class SearchResultsDialog(wx.Dialog):
     @property
     def has_hits(self) -> bool:
         return bool(self._hits)
-from .content_panel import MetadataPanel
+from .content_panel import MetadataPanel, QueuesPanel
 from .navigation import NavigationTree
 from .playback import PlaybackPanel
 
@@ -137,6 +140,16 @@ class MainFrame(wx.Frame):
         self._account: Optional[MyPlexAccount] = None
         self._busy_info: Optional[wx.BusyInfo] = None
         self._pending_selection: Optional[SearchHit] = None
+        self._queue_refresh_timer: Optional[wx.CallLater] = None
+        self._last_queue_play_key: Optional[str] = None
+        self._timeline_threads: list[threading.Thread] = []
+        self._status_message: str = ""
+        self._status_bar: Optional[wx.StatusBar] = None
+        self._selected_object: Optional[PlexObject] = None
+        self._closing: bool = False
+        self._progress_flush_active: bool = False
+        self._progress_flush_timer: Optional[wx.CallLater] = None
+        self._last_positions: Dict[str, int] = {}
 
         self._build_menu()
 
@@ -149,25 +162,40 @@ class MainFrame(wx.Frame):
             loader=self._load_children,
             on_selection=self._handle_selection,
         )
+        self._nav_tree.Bind(wx.EVT_KEY_DOWN, self._on_navigation_key)
         left_sizer = wx.BoxSizer(wx.VERTICAL)
         left_sizer.Add(self._nav_tree, 1, wx.EXPAND)
         left_panel.SetSizer(left_sizer)
 
         right_splitter = wx.SplitterWindow(right_panel, style=wx.SP_LIVE_UPDATE)
-        self._metadata_panel = MetadataPanel(right_splitter, on_play=self._start_playback)
+        top_splitter = wx.SplitterWindow(right_splitter, style=wx.SP_LIVE_UPDATE)
+        self._metadata_panel = MetadataPanel(top_splitter, on_play=self._start_playback)
+        self._metadata_panel.set_status_message("Connecting...")
+        self._queues_panel = QueuesPanel(
+            top_splitter,
+            on_play=self._start_playback,
+            on_select=self._handle_queue_selection,
+            on_refresh=self._refresh_watch_queues,
+        )
+        top_splitter.SplitHorizontally(self._metadata_panel, self._queues_panel, sashPosition=190)
+        top_splitter.SetMinimumPaneSize(150)
+
         self._playback_panel = PlaybackPanel(right_splitter, config)
         self._playback_panel.set_state_listener(self._on_playback_state_change)
-        right_splitter.SplitHorizontally(self._metadata_panel, self._playback_panel, sashPosition=280)
+        self._playback_panel.set_timeline_callback(self._handle_timeline_update)
+        right_splitter.SplitHorizontally(top_splitter, self._playback_panel, sashPosition=320)
 
         right_sizer = wx.BoxSizer(wx.VERTICAL)
         right_sizer.Add(right_splitter, 1, wx.EXPAND)
         right_panel.SetSizer(right_sizer)
+        self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
 
         splitter.SplitVertically(left_panel, right_panel, sashPosition=320)
         splitter.SetMinimumPaneSize(180)
-        right_splitter.SetMinimumPaneSize(180)
+        right_splitter.SetMinimumPaneSize(220)
 
         self.CreateStatusBar()
+        self._status_bar = self.GetStatusBar()
         self.CentreOnScreen()
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -192,8 +220,9 @@ class MainFrame(wx.Frame):
         self._player_pause_item = player_menu.Append(wx.ID_ANY, "Pause\tShift+Space")
         self._player_stop_item = player_menu.Append(wx.ID_STOP, "Stop\tCtrl+.")
         player_menu.AppendSeparator()
-        self._player_volume_up_item = player_menu.Append(wx.ID_ANY, "Volume Up\tCtrl++")
-        self._player_volume_down_item = player_menu.Append(wx.ID_ANY, "Volume Down\tCtrl+-")
+        self._player_volume_up_item = player_menu.Append(wx.ID_ANY, "Volume Up\tCtrl+Up")
+        self._player_volume_down_item = player_menu.Append(wx.ID_ANY, "Volume Down\tCtrl+Down")
+        self._player_fullscreen_item = player_menu.AppendCheckItem(wx.ID_ANY, "Fullscreen\tF11")
         self._player_mute_item = player_menu.AppendCheckItem(wx.ID_ANY, "Mute\tCtrl+0")
         menu_bar.Append(player_menu, "&Player")
         self._player_menu = player_menu
@@ -212,6 +241,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._handle_player_volume_up, self._player_volume_up_item)
         self.Bind(wx.EVT_MENU, self._handle_player_volume_down, self._player_volume_down_item)
         self.Bind(wx.EVT_MENU, self._handle_player_mute, self._player_mute_item)
+        self.Bind(wx.EVT_MENU, self._handle_player_fullscreen, self._player_fullscreen_item)
 
         self._update_menu_state()
         self._refresh_player_menu()
@@ -258,39 +288,118 @@ class MainFrame(wx.Frame):
         self._nav_tree.clear()
         self._set_status(f"Failed to load libraries: {exc}")
         wx.MessageBox(f"Unable to load Plex libraries:\n{exc}", "Plexible", wx.ICON_ERROR | wx.OK, parent=self)
+        self._queues_panel.show_placeholders("Unable to load queues.", "Unable to load queues.")
 
     def _handle_libraries_loaded(self, server: PlexServer, libraries: Iterable) -> None:
         try:
             self._nav_tree.populate(libraries)
         except RuntimeError:
             return
-        self._set_status(f"Connected to {server.friendlyName}.")
+        self._status_message = f"Connected to {server.friendlyName}"
+        self._set_status(self._status_message)
+
+        self._refresh_watch_queues()
+        self._flush_pending_progress()
 
     def _load_children(self, plex_object: PlexObject):
         if not self._service:
             return []
         return self._service.list_children(plex_object)
 
+    def _refresh_watch_queues(self) -> None:
+        if not hasattr(self, "_queues_panel"):
+            return
+        self._cancel_queue_refresh_timer()
+        if not self._service:
+            self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
+            return
+
+        self._queues_panel.show_placeholders("Loading...", "Loading...")
+
+        def worker() -> None:
+            try:
+                continue_items, up_next_items = self._service.watch_queues()  # type: ignore[union-attr]
+                continue_items = self._merge_pending_progress(continue_items)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Queues] Unable to load queues: {exc}")
+                wx.CallAfter(
+                    self._queues_panel.show_placeholders,
+                    "Unable to load queues. Try again shortly.",
+                    "Unable to load queues. Try again shortly.",
+                )
+                return
+            wx.CallAfter(self._queues_panel.update_lists, continue_items, up_next_items)
+
+        threading.Thread(target=worker, name="PlexQueueLoader", daemon=True).start()
+
     def _handle_selection(self, plex_object: Optional[PlexObject]) -> None:
+        self._selected_object = plex_object
         if not self._service:
             self._metadata_panel.update_content(None, None)
             return
         playable = self._service.to_playable(plex_object) if plex_object else None
         self._metadata_panel.update_content(plex_object, playable)
 
+    def _on_navigation_key(self, event: wx.KeyEvent) -> None:
+        code = event.GetKeyCode()
+        if code in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if self._service and self._selected_object:
+                if self._play_selected_object(self._selected_object):
+                    return
+        event.Skip()
+
+    def _play_selected_object(self, plex_object: PlexObject) -> bool:
+        if not self._service:
+            return False
+        playable = self._service.to_playable(plex_object)
+        if not playable:
+            playable = self._first_playable_descendant(plex_object)
+        if playable:
+            self._start_playback(playable)
+            self._queue_manual_play(playable)
+            return True
+        return False
+
     def _start_playback(self, media: PlayableMedia) -> None:
+        rating_key = getattr(media.item, "ratingKey", None)
+        if self._service and rating_key:
+            pending = self._config.get_pending_entry(str(rating_key))
+            if pending:
+                try:
+                    position = int(pending.get("position", 0))
+                    duration = int(pending.get("duration", 0))
+                    state = str(pending.get("state", "playing") or "playing")
+                    if position > 0 and duration > 0:
+                        print(f"[Progress] flushing before playback {rating_key} pos={position}")
+                        applied_state, server_offset = self._service.update_progress_by_key(  # type: ignore[arg-type]
+                            str(rating_key),
+                            position,
+                            duration,
+                            state,
+                        )
+                        print(f"[Progress] pre-play flush applied state={applied_state} offset={server_offset}")
+                        if server_offset > 0:
+                            self._config.remove_pending_progress(str(rating_key))
+                            self._last_positions[str(rating_key)] = server_offset
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[Progress] Unable to pre-flush {rating_key}: {exc}")
+        self._schedule_progress_flush(5000)
         mode = self._playback_panel.play(media)
         if mode == "libvlc":
             player_desc = "built-in LibVLC"
-        elif mode == "browser":
-            player_desc = "embedded browser"
         elif mode == "vlc":
             player_desc = "VLC"
         elif mode == "mpc":
             player_desc = "MPC"
+        elif mode == "none":
+            player_desc = "player (failed)"
         else:
             player_desc = "player"
         self._set_status(f"Streaming {media.title} ({media.media_type}) via {player_desc}")
+
+    def _handle_queue_selection(self, media: Optional[PlayableMedia]) -> None:
+        if media:
+            self._metadata_panel.update_content(media.item, media)
 
     def _handle_sign_in(self, _: wx.CommandEvent) -> None:
         if self._account:
@@ -304,6 +413,8 @@ class MainFrame(wx.Frame):
         self._auth.authenticate_with_browser(callback)
 
     def _on_auth_result(self, success: bool, account: Optional[MyPlexAccount], error: Optional[Exception]) -> None:
+        self._cancel_progress_flush_timer()
+        self._flush_pending_progress_sync()
         self._clear_busy()
         if success and account:
             self._set_account(account)
@@ -322,6 +433,9 @@ class MainFrame(wx.Frame):
         self._nav_tree.clear()
         self._metadata_panel.update_content(None, None)
         self._playback_panel.stop()
+        self._cancel_queue_refresh_timer()
+        self._last_queue_play_key = None
+        self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
         self._set_status("Signed out.")
         self._update_menu_state()
         self._refresh_player_menu()
@@ -470,12 +584,15 @@ class MainFrame(wx.Frame):
         current_id = self._service.current_resource_id() if self._service else None  # type: ignore[union-attr]
         if label is None:
             label = self._format_server_label(resource, current_id)
+        if current_id and resource.clientIdentifier == current_id:
+            self._set_status(f"Already connected to {label}.")
+            return
         self._pending_selection = post_selection
         self._show_busy(f"Connecting to {label}...")
 
         def worker() -> None:
             try:
-                server = self._service.connect(identifier=resource.clientIdentifier)  # type: ignore[union-attr]
+                server = self._service.connect_resource(resource)  # type: ignore[union-attr]
                 libraries = list(self._service.libraries())  # type: ignore[union-attr]
             except Exception as exc:  # noqa: BLE001
                 wx.CallAfter(self._handle_server_change_error, exc)
@@ -493,6 +610,10 @@ class MainFrame(wx.Frame):
         except RuntimeError:
             pass
         self._metadata_panel.update_content(None, None)
+        self._cancel_queue_refresh_timer()
+        self._last_queue_play_key = None
+        self._refresh_watch_queues()
+        self._flush_pending_progress()
         self._set_status(f"Connected to {server.friendlyName}.")
         self._refresh_player_menu()
         if self._pending_selection:
@@ -522,6 +643,144 @@ class MainFrame(wx.Frame):
         self._change_server_item.Enable(signed_in)
         self._refresh_player_menu()
 
+    def _handle_timeline_update(self, media: PlayableMedia, state: str, position: int, duration: int, sync: bool = False) -> None:
+        if not self._service:
+            return
+        rating_key = getattr(media.item, "ratingKey", None)
+        bounded_duration = max(0, duration)
+        if not bounded_duration:
+            try:
+                bounded_duration = int(getattr(media.item, "duration", 0) or 0)
+            except Exception:
+                bounded_duration = 0
+        bounded_position = max(0, position)
+        if bounded_duration and bounded_position > bounded_duration:
+            bounded_position = bounded_duration
+        if rating_key:
+            last_known = self._last_positions.get(rating_key, 0)
+            if bounded_position <= 0 and last_known > 0:
+                bounded_position = last_known
+
+        if state == "stopped" and bounded_position <= 0 and rating_key:
+            pending_entry = self._config.get_pending_entry(rating_key)
+            prior_known = max(
+                self._last_positions.get(rating_key, 0),
+                pending_entry.get("position", 0),
+            )
+            if prior_known > 0:
+                bounded_position = prior_known
+            else:
+                self._last_positions.pop(rating_key, None)
+                return
+
+        def update() -> None:
+            local_offset: Optional[int] = None
+            applied_state = state
+            try:
+                print(
+                    f"[Timeline] push state={state} key={rating_key} pos={bounded_position} "
+                    f"dur={bounded_duration} closing={self._closing} sync={sync}"
+                )
+                applied_state, local_offset = self._service.update_timeline(
+                    media,
+                    state,
+                    bounded_position,
+                    bounded_duration,
+                )  # type: ignore[union-attr]
+                if (sync or self._closing) and rating_key is not None:
+                    print(f"[Timeline] server viewOffset={local_offset} for key={rating_key}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Timeline] Unable to update playback status: {exc}")
+            finally:
+                if rating_key:
+                    if sync:
+                        self._ingest_progress(rating_key, bounded_position, bounded_duration, applied_state, local_offset)
+                    else:
+                        wx.CallAfter(
+                            self._ingest_progress,
+                            rating_key,
+                            bounded_position,
+                            bounded_duration,
+                            applied_state,
+                            local_offset,
+                        )
+
+        if sync or self._closing:
+            update()
+        else:
+            def worker() -> None:
+                try:
+                    update()
+                finally:
+                    try:
+                        self._timeline_threads.remove(threading.current_thread())
+                    except ValueError:
+                        pass
+
+            thread = threading.Thread(target=worker, name="PlexTimelineUpdate", daemon=True)
+            self._timeline_threads.append(thread)
+            thread.start()
+
+        if self._closing:
+            if rating_key:
+                if bounded_position > 0:
+                    self._last_positions[rating_key] = bounded_position
+                elif state == "stopped":
+                    self._last_positions.pop(rating_key, None)
+            return
+        if state == "playing":
+            if rating_key and rating_key != self._last_queue_play_key:
+                self._last_queue_play_key = rating_key
+                wx.CallAfter(self._schedule_queue_refresh, 750)
+        elif state == "stopped":
+            self._last_queue_play_key = None
+            wx.CallAfter(self._refresh_watch_queues)
+            wx.CallAfter(self._schedule_queue_refresh, 2000)
+        if rating_key:
+            self._schedule_progress_flush(5000)
+        if rating_key:
+            if bounded_position > 0:
+                self._last_positions[rating_key] = bounded_position
+            elif state == "stopped":
+                self._last_positions.pop(rating_key, None)
+
+    def _queue_manual_play(self, media: PlayableMedia) -> None:
+        if not self._service:
+            return
+        rating_key = getattr(media.item, "ratingKey", None)
+        if rating_key:
+            self._last_queue_play_key = rating_key
+            resume = int(getattr(media, "resume_offset", 0) or getattr(media.item, "viewOffset", 0) or 0)
+            if resume > 0:
+                self._last_positions[rating_key] = resume
+                self._config.upsert_pending_progress(
+                    rating_key,
+                    resume,
+                    int(getattr(media.item, "duration", 0) or 0),
+                    "playing",
+                )
+            else:
+                self._last_positions.pop(rating_key, None)
+        wx.CallAfter(self._schedule_queue_refresh, 3000)
+        self._schedule_progress_flush(5000)
+
+    def _first_playable_descendant(self, plex_object: PlexObject, depth: int = 0, max_depth: int = 3) -> Optional[PlayableMedia]:
+        if depth >= max_depth:
+            return None
+        try:
+            children = list(self._service.list_children(plex_object)) if self._service else []
+        except Exception:
+            children = []
+        for child in children:
+            playable = self._service.to_playable(child) if self._service else None
+            if playable:
+                return playable
+        for child in children:
+            descendant = self._first_playable_descendant(child, depth + 1, max_depth)
+            if descendant:
+                return descendant
+        return None
+
     def _on_playback_state_change(self, state: dict[str, object]) -> None:
         self._refresh_player_menu(state)
 
@@ -542,6 +801,8 @@ class MainFrame(wx.Frame):
         self._player_volume_up_item.Enable(can_volume)
         self._player_volume_down_item.Enable(can_volume)
         self._player_mute_item.Enable(can_volume)
+        self._player_fullscreen_item.Enable(can_volume)
+        self._player_fullscreen_item.Check(bool(state.get("fullscreen", False)))
         self._player_mute_item.Check(muted)
 
     def _handle_player_play(self, _: wx.CommandEvent) -> None:
@@ -569,6 +830,12 @@ class MainFrame(wx.Frame):
             wx.Bell()
         self._refresh_player_menu()
 
+    def _handle_player_fullscreen(self, _: wx.CommandEvent) -> None:
+        if not self._playback_panel.set_fullscreen(self._player_fullscreen_item.IsChecked()):
+            wx.Bell()
+            self._player_fullscreen_item.Check(self._playback_panel.is_fullscreen())
+        self._refresh_player_menu()
+
     def _handle_player_mute(self, event: wx.CommandEvent) -> None:
         desired = event.IsChecked()
         current_state = self._playback_panel.get_state()
@@ -585,9 +852,13 @@ class MainFrame(wx.Frame):
         return f"{name}{suffix}"
 
     def _set_status(self, message: str) -> None:
-        status_bar = self.GetStatusBar()
-        if status_bar:
-            status_bar.SetStatusText(message)
+        self._status_message = message
+        if hasattr(self, "_metadata_panel") and self._metadata_panel:
+            self._metadata_panel.set_status_message(message)
+        if self._status_bar is None:
+            self._status_bar = self.GetStatusBar()
+        if self._status_bar:
+            self._status_bar.SetStatusText(message or "")
 
     def _show_busy(self, message: str) -> None:
         self._clear_busy()
@@ -598,5 +869,236 @@ class MainFrame(wx.Frame):
             self._busy_info = None
 
     def _on_close(self, event: wx.CloseEvent) -> None:
+        self._closing = True
+        if hasattr(self, "_playback_panel"):
+            try:
+                self._playback_panel.set_fullscreen(False)
+            except Exception:
+                pass
+            try:
+                self._playback_panel.force_timeline_snapshot()
+            except Exception:
+                pass
+            try:
+                self._playback_panel.stop()
+            except Exception:
+                pass
         self._clear_busy()
+        self._cancel_queue_refresh_timer()
+        self._cancel_progress_flush_timer()
+        self._flush_pending_progress_sync()
+        for thread in list(self._timeline_threads):
+            try:
+                thread.join(timeout=2.5)
+            except Exception:
+                pass
+        self._timeline_threads.clear()
         event.Skip()
+
+    def _schedule_queue_refresh(self, delay_ms: int = 2000) -> None:
+        self._cancel_queue_refresh_timer()
+        self._queue_refresh_timer = wx.CallLater(delay_ms, self._refresh_watch_queues)
+
+    def _cancel_queue_refresh_timer(self) -> None:
+        if self._queue_refresh_timer:
+            try:
+                self._queue_refresh_timer.Stop()
+            except Exception:
+                pass
+        self._queue_refresh_timer = None
+        # Clean up finished timeline workers
+        alive_threads: list[threading.Thread] = []
+        for thread in self._timeline_threads:
+            if thread.is_alive():
+                alive_threads.append(thread)
+        self._timeline_threads = alive_threads
+
+    def _merge_pending_progress(self, continue_items: List[PlayableMedia]) -> List[PlayableMedia]:
+        overrides: Dict[str, tuple[int, Optional[int]]] = {}
+        pending = self._config.get_pending_progress()
+        for rating_key, payload in pending.items():
+            try:
+                position = int(payload.get("position", 0))
+                duration = int(payload.get("duration", 0))
+            except Exception:
+                continue
+            if position > 0:
+                overrides[rating_key] = (position, duration if duration > 0 else None)
+        for rating_key, position in self._last_positions.items():
+            if position <= 0:
+                continue
+            existing = overrides.get(rating_key)
+            if existing is None or position > existing[0]:
+                overrides[rating_key] = (position, existing[1] if existing else None)
+        if not overrides or not self._service:
+            return continue_items
+
+        merged = list(continue_items)
+        seen: Dict[str, int] = {}
+        for index, media in enumerate(continue_items):
+            key = str(getattr(media.item, "ratingKey", ""))
+            if key:
+                seen[key] = index
+                override = overrides.get(key)
+                if override and override[0] > 0:
+                    media.resume_offset = override[0]
+                    try:
+                        setattr(media.item, "viewOffset", override[0])
+                    except Exception:
+                        pass
+                    overrides.pop(key, None)
+
+        for rating_key, (position, duration) in list(overrides.items()):
+            if position <= 0:
+                continue
+            try:
+                item = self._service.fetch_item(rating_key)  # type: ignore[arg-type]
+            except Exception:
+                continue
+            playable = self._service.to_playable(item)
+            if not playable:
+                continue
+            playable.resume_offset = position
+            try:
+                setattr(playable.item, "viewOffset", position)
+            except Exception:
+                pass
+            key = str(getattr(playable.item, "ratingKey", ""))
+            if key in seen:
+                merged[seen[key]] = playable
+            else:
+                merged.insert(0, playable)
+                seen[key] = 0
+        return merged
+
+    def _ingest_progress(
+        self,
+        rating_key: Optional[str],
+        position: int,
+        duration: int,
+        state: str,
+        server_offset: Optional[int],
+    ) -> None:
+        if not rating_key or duration <= 0:
+            return
+        rating_key = str(rating_key)
+        server_position = server_offset if server_offset and server_offset > 0 else None
+        effective = max(0, position, server_position or 0)
+        if effective <= 0:
+            if state == "stopped":
+                self._config.remove_pending_progress(rating_key)
+                self._last_positions.pop(rating_key, None)
+            return
+        if effective >= int(duration * 0.9):
+            self._config.remove_pending_progress(rating_key)
+            self._last_positions.pop(rating_key, None)
+            return
+        if server_position is not None and server_position >= max(0, effective - 2000):
+            self._config.remove_pending_progress(rating_key)
+            self._last_positions[rating_key] = server_position
+            return
+        existing = self._config.get_pending_progress().get(rating_key)
+        prior = max(
+            self._last_positions.get(rating_key, 0),
+            (existing or {}).get("position", 0),
+            server_position or 0,
+        )
+        if prior and effective + 2000 < prior:
+            return
+        if prior and effective < 1000:
+            return
+        if effective < 1000:
+            return
+        if existing and abs(existing.get("position", 0) - effective) < 750:
+            return
+        self._config.upsert_pending_progress(rating_key, effective, duration, state)
+        self._last_positions[rating_key] = effective
+        print(f"[Progress] cached {rating_key} pos={effective} dur={duration} state={state} server={server_offset}")
+        if not self._closing:
+            wx.CallAfter(self._schedule_queue_refresh, 750)
+            self._flush_pending_progress()
+            self._schedule_progress_flush(5000)
+
+    def _flush_pending_progress(self) -> None:
+        if not self._service:
+            return
+        if self._progress_flush_active:
+            return
+        pending = self._config.get_pending_progress()
+        if not pending:
+            self._cancel_progress_flush_timer()
+            return
+
+        work_items = list(pending.items())
+
+        def worker() -> None:
+            self._progress_flush_active = True
+            changed = self._process_pending_progress(work_items)
+            if changed:
+                wx.CallAfter(self._schedule_queue_refresh, 2000)
+            if not self._config.get_pending_progress():
+                wx.CallAfter(self._cancel_progress_flush_timer)
+            self._progress_flush_active = False
+
+        threading.Thread(target=worker, name="PlexProgressFlusher", daemon=True).start()
+        self._schedule_progress_flush()
+
+    def _flush_pending_progress_sync(self) -> None:
+        while self._progress_flush_active:
+            time.sleep(0.05)
+        if not self._service:
+            return
+        pending = self._config.get_pending_progress()
+        if not pending:
+            return
+        work_items = list(pending.items())
+        self._progress_flush_active = True
+        changed = self._process_pending_progress(work_items)
+        self._progress_flush_active = False
+        if changed:
+            self._schedule_queue_refresh(2000)
+        if not self._config.get_pending_progress():
+            self._cancel_progress_flush_timer()
+
+    def _process_pending_progress(self, items: list[tuple[str, dict[str, int]]]) -> bool:
+        changed = False
+        for rating_key, payload in items:
+            try:
+                position = int(payload.get("position", 0))
+                duration = int(payload.get("duration", 0))
+                state = str(payload.get("state", "stopped") or "stopped")
+            except Exception:
+                continue
+            print(f"[Progress] flushing {rating_key} pos={position} dur={duration} state={state}")
+            if position <= 0 or duration <= 0:
+                self._config.remove_pending_progress(rating_key)
+                continue
+            try:
+                applied_state, server_offset = self._service.update_progress_by_key(  # type: ignore[arg-type]
+                    rating_key,
+                    position,
+                    duration,
+                    state,
+                )
+                print(f"[Progress] server accepted {rating_key} new state={applied_state} offset={server_offset}")
+                if server_offset > 0:
+                    self._config.remove_pending_progress(rating_key)
+                    self._last_positions[str(rating_key)] = server_offset
+                    changed = True
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Timeline] Unable to flush cached progress for {rating_key}: {exc}")
+        return changed
+
+    def _schedule_progress_flush(self, delay_ms: int = 10000) -> None:
+        self._cancel_progress_flush_timer()
+        if self._closing:
+            return
+        self._progress_flush_timer = wx.CallLater(delay_ms, self._flush_pending_progress)
+
+    def _cancel_progress_flush_timer(self) -> None:
+        if self._progress_flush_timer:
+            try:
+                self._progress_flush_timer.Stop()
+            except Exception:
+                pass
+        self._progress_flush_timer = None
