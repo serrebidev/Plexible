@@ -238,6 +238,127 @@ class PlexService:
         )
         return self.update_timeline(media, state, position, duration)
 
+    @staticmethod
+    def _resolve_related(item: PlexObject, attr_name: str) -> Optional[PlexObject]:
+        """Safely resolve related Plex objects that may be attributes or callables."""
+        related = getattr(item, attr_name, None)
+        if callable(related):
+            try:
+                return related()
+            except Exception:
+                return None
+        return related
+
+    def _first_episode_in_season(self, season: Optional[PlexObject]) -> Optional[PlexObject]:
+        if season is None:
+            return None
+        try:
+            episodes = list(season.episodes())
+        except Exception:
+            return None
+        if not episodes:
+            return None
+        try:
+            episodes.sort(key=lambda ep: (getattr(ep, "index", 0) or 0, getattr(ep, "ratingKey", "")))
+        except Exception:
+            pass
+        for episode in episodes:
+            if getattr(episode, "ratingKey", None):
+                return episode
+        return None
+
+    def _next_episode_in_season(self, episode: PlexObject, season: Optional[PlexObject]) -> Optional[PlexObject]:
+        if season is None:
+            return None
+        current_key = getattr(episode, "ratingKey", None)
+        current_index = getattr(episode, "index", None)
+        try:
+            episodes = list(season.episodes())
+        except Exception:
+            return None
+        if not episodes:
+            return None
+        try:
+            episodes.sort(key=lambda ep: (getattr(ep, "index", 0) or 0, getattr(ep, "ratingKey", "")))
+        except Exception:
+            pass
+        seen_current = False
+        for candidate in episodes:
+            key = getattr(candidate, "ratingKey", None)
+            if key == current_key:
+                seen_current = True
+                continue
+            if not seen_current and current_index is not None:
+                try:
+                    candidate_index = getattr(candidate, "index", None)
+                except Exception:
+                    candidate_index = None
+                if candidate_index is not None and current_index is not None and candidate_index > current_index:
+                    seen_current = True
+                else:
+                    continue
+            if seen_current and key and key != current_key:
+                return candidate
+        return None
+
+    def _next_episode_after_season(self, season: Optional[PlexObject], show: Optional[PlexObject]) -> Optional[PlexObject]:
+        if show is None:
+            return None
+        current_season_key = getattr(season, "ratingKey", None) if season else None
+        current_index = getattr(season, "index", None) if season else None
+        try:
+            seasons = list(show.seasons())
+        except Exception:
+            return None
+        if not seasons:
+            return None
+        try:
+            seasons.sort(key=lambda s: (getattr(s, "index", 0) or 0, getattr(s, "ratingKey", "")))
+        except Exception:
+            pass
+        seen_current = current_season_key is None
+        for candidate in seasons:
+            key = getattr(candidate, "ratingKey", None)
+            index = getattr(candidate, "index", None)
+            if current_season_key and key == current_season_key:
+                seen_current = True
+                continue
+            if not seen_current and current_index is not None and index is not None and index > current_index:
+                seen_current = True
+            if not seen_current:
+                continue
+            next_episode = self._first_episode_in_season(candidate)
+            if next_episode:
+                return next_episode
+        return None
+
+    def find_next_episode(self, item: PlexObject) -> Optional[PlexObject]:
+        if getattr(item, "type", "") != "episode":
+            return None
+        current_key = getattr(item, "ratingKey", None)
+        show = self._resolve_related(item, "show")
+        if show is not None:
+            try:
+                next_item = show.onDeck()
+            except Exception:
+                next_item = None
+            if next_item and getattr(next_item, "ratingKey", None) not in {None, current_key}:
+                return next_item
+        season = self._resolve_related(item, "season")
+        next_item = self._next_episode_in_season(item, season)
+        if next_item:
+            return next_item
+        return self._next_episode_after_season(season, show)
+
+    def next_in_series(self, item: PlexObject) -> Optional[PlayableMedia]:
+        next_item = self.find_next_episode(item)
+        if not next_item:
+            return None
+        playable = self.to_playable(next_item)
+        if playable:
+            playable.resume_offset = int(getattr(next_item, "viewOffset", 0) or 0)
+        return playable
+
     def watch_queues(
         self,
         continue_limit: int = 25,
@@ -289,26 +410,20 @@ class PlexService:
         return continue_items, up_next_items
 
     def _determine_up_next(self, item: PlexObject) -> Optional[PlexObject]:
-        show_attr = getattr(item, "show", None)
-        show = None
-        if callable(show_attr):
-            try:
-                show = show_attr()
-            except Exception:
-                show = None
-        elif show_attr is not None:
-            show = show_attr
+        if getattr(item, "type", "") == "episode":
+            next_item = self.find_next_episode(item)
+            if next_item:
+                return next_item
+        show = self._resolve_related(item, "show")
         if show is None:
             return None
         try:
-            next_item = show.onDeck()
+            candidate = show.onDeck()
         except Exception:
-            return None
-        if not next_item:
-            return None
-        if getattr(next_item, "ratingKey", None) == getattr(item, "ratingKey", None):
-            return None
-        return next_item
+            candidate = None
+        if candidate and getattr(candidate, "ratingKey", None) not in {None, getattr(item, "ratingKey", None)}:
+            return candidate
+        return None
 
     def update_timeline(self, media: PlayableMedia, state: str, position: int, duration: int) -> tuple[str, int]:
         item = media.item
@@ -327,7 +442,7 @@ class PlexService:
         near_completion = False
         send_state = state
         if state == "stopped" and bounded_duration:
-            if bounded_position >= int(bounded_duration * 0.98):
+            if bounded_position >= int(bounded_duration * 0.97):
                 near_completion = True
             else:
                 send_state = "paused"

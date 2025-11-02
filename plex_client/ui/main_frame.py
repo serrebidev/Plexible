@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
 
 import wx
 
@@ -150,6 +150,12 @@ class MainFrame(wx.Frame):
         self._progress_flush_active: bool = False
         self._progress_flush_timer: Optional[wx.CallLater] = None
         self._last_positions: Dict[str, int] = {}
+        self._autoplay_sources: Dict[str, str] = {}
+        self._autoplay_candidates: Dict[str, PlayableMedia] = {}
+        self._autoplay_flagged: Set[str] = set()
+        self._autoplay_pending_source: Optional[str] = None
+        self._autoplay_timer: Optional[wx.CallLater] = None
+        self._reset_autoplay_state()
 
         self._build_menu()
 
@@ -434,6 +440,7 @@ class MainFrame(wx.Frame):
         self._metadata_panel.update_content(None, None)
         self._playback_panel.stop()
         self._cancel_queue_refresh_timer()
+        self._reset_autoplay_state()
         self._last_queue_play_key = None
         self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
         self._set_status("Signed out.")
@@ -611,6 +618,7 @@ class MainFrame(wx.Frame):
             pass
         self._metadata_panel.update_content(None, None)
         self._cancel_queue_refresh_timer()
+        self._reset_autoplay_state()
         self._last_queue_play_key = None
         self._refresh_watch_queues()
         self._flush_pending_progress()
@@ -646,7 +654,8 @@ class MainFrame(wx.Frame):
     def _handle_timeline_update(self, media: PlayableMedia, state: str, position: int, duration: int, sync: bool = False) -> None:
         if not self._service:
             return
-        rating_key = getattr(media.item, "ratingKey", None)
+        raw_rating_key = getattr(media.item, "ratingKey", None)
+        rating_key = str(raw_rating_key) if raw_rating_key is not None else None
         bounded_duration = max(0, duration)
         if not bounded_duration:
             try:
@@ -672,6 +681,20 @@ class MainFrame(wx.Frame):
             else:
                 self._last_positions.pop(rating_key, None)
                 return
+
+        progress_ratio = 0.0
+        near_completion = False
+        if bounded_duration > 0:
+            progress_ratio = bounded_position / bounded_duration
+            near_completion = progress_ratio >= 0.97
+
+        if rating_key and near_completion:
+            next_key = self._prime_autoplay_candidate(media)
+            if state == "stopped" and next_key and not self._closing:
+                self._schedule_autoplay(rating_key)
+        elif state == "stopped" and rating_key and self._autoplay_pending_source == rating_key:
+            self._cancel_autoplay_timer()
+            self._autoplay_pending_source = None
 
         def update() -> None:
             local_offset: Optional[int] = None
@@ -744,11 +767,126 @@ class MainFrame(wx.Frame):
             elif state == "stopped":
                 self._last_positions.pop(rating_key, None)
 
+    def _prime_autoplay_candidate(self, media: PlayableMedia) -> Optional[str]:
+        if not self._service:
+            return None
+        raw_key = getattr(media.item, "ratingKey", None)
+        if raw_key is None:
+            return None
+        source_key = str(raw_key)
+        existing = self._autoplay_sources.get(source_key)
+        if existing and existing in self._autoplay_candidates:
+            return existing
+        if source_key in self._autoplay_flagged and not existing:
+            return None
+        try:
+            next_media = self._service.next_in_series(media.item)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Autoplay] Unable to evaluate next episode for {source_key}: {exc}")
+            self._autoplay_flagged.add(source_key)
+            return existing
+        self._autoplay_flagged.add(source_key)
+        if not next_media:
+            return existing
+        next_key_raw = getattr(next_media.item, "ratingKey", None)
+        if next_key_raw is None:
+            return existing
+        next_key = str(next_key_raw)
+        self._autoplay_sources[source_key] = next_key
+        self._autoplay_candidates[next_key] = next_media
+        self._config.remove_pending_progress(next_key)
+        self._last_positions.pop(next_key, None)
+        print(f"[Autoplay] Prepared next episode {next_key} from source {source_key}")
+        return next_key
+
+    def _cancel_autoplay_timer(self) -> None:
+        if self._autoplay_timer:
+            try:
+                self._autoplay_timer.Stop()
+            except Exception:
+                pass
+        self._autoplay_timer = None
+
+    def _schedule_autoplay(self, source_key: str) -> None:
+        if not source_key:
+            return
+        if self._autoplay_pending_source == source_key and self._autoplay_timer:
+            return
+        self._cancel_autoplay_timer()
+        self._autoplay_pending_source = source_key
+        self._autoplay_timer = wx.CallLater(900, self._autoplay_next, source_key)
+
+    def _autoplay_next(self, source_key: str) -> None:
+        self._autoplay_timer = None
+        if self._closing or not self._service:
+            return
+        source_key_str = str(source_key)
+        next_key = self._autoplay_sources.get(source_key_str)
+        if not next_key:
+            return
+        media = self._autoplay_candidates.get(next_key)
+        if not media:
+            try:
+                item = self._service.fetch_item(next_key)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Autoplay] Unable to fetch next episode {next_key}: {exc}")
+                self._remove_autoplay_candidate(source_key=source_key_str, clear_flag=True)
+                return
+            media = self._service.to_playable(item)
+            if not media:
+                self._remove_autoplay_candidate(source_key=source_key_str, clear_flag=True)
+                return
+        state = self._playback_panel.get_state() if hasattr(self, "_playback_panel") else {}
+        if state.get("has_media", False):
+            print("[Autoplay] Player busy, skipping automatic play.")
+            return
+        print(f"[Autoplay] Starting next episode {next_key} (source {source_key_str})")
+        self._autoplay_pending_source = None
+        self._remove_autoplay_candidate(source_key=source_key_str, clear_flag=True)
+        self._start_playback(media)
+        self._queue_manual_play(media)
+        self._set_status(f"Auto-playing next episode: {media.title}")
+
+    def _remove_autoplay_candidate(
+        self,
+        *,
+        next_key: Optional[str] = None,
+        source_key: Optional[str] = None,
+        clear_flag: bool = False,
+    ) -> None:
+        if next_key is not None:
+            key = str(next_key)
+            self._autoplay_candidates.pop(key, None)
+            for src, mapped in list(self._autoplay_sources.items()):
+                if mapped == key:
+                    self._autoplay_sources.pop(src, None)
+                    if clear_flag:
+                        self._autoplay_flagged.discard(src)
+        if source_key is not None:
+            src_key = str(source_key)
+            mapped = self._autoplay_sources.pop(src_key, None)
+            if mapped:
+                self._autoplay_candidates.pop(mapped, None)
+            if clear_flag:
+                self._autoplay_flagged.discard(src_key)
+
+    def _reset_autoplay_state(self) -> None:
+        self._cancel_autoplay_timer()
+        self._autoplay_sources.clear()
+        self._autoplay_candidates.clear()
+        self._autoplay_flagged.clear()
+        self._autoplay_pending_source = None
+
     def _queue_manual_play(self, media: PlayableMedia) -> None:
         if not self._service:
             return
-        rating_key = getattr(media.item, "ratingKey", None)
+        self._cancel_autoplay_timer()
+        self._autoplay_pending_source = None
+        raw_key = getattr(media.item, "ratingKey", None)
+        rating_key = str(raw_key) if raw_key is not None else None
         if rating_key:
+            self._remove_autoplay_candidate(next_key=rating_key, clear_flag=True)
+            self._autoplay_flagged.discard(rating_key)
             self._last_queue_play_key = rating_key
             resume = int(getattr(media, "resume_offset", 0) or getattr(media.item, "viewOffset", 0) or 0)
             if resume > 0:
@@ -885,6 +1023,7 @@ class MainFrame(wx.Frame):
                 pass
         self._clear_busy()
         self._cancel_queue_refresh_timer()
+        self._cancel_autoplay_timer()
         self._cancel_progress_flush_timer()
         self._flush_pending_progress_sync()
         for thread in list(self._timeline_threads):
@@ -969,6 +1108,13 @@ class MainFrame(wx.Frame):
             else:
                 merged.insert(0, playable)
                 seen[key] = 0
+        for next_key, autoplay_media in list(self._autoplay_candidates.items()):
+            key = str(next_key)
+            if key in seen:
+                self._remove_autoplay_candidate(next_key=key)
+                continue
+            merged.insert(0, autoplay_media)
+            seen[key] = 0
         return merged
 
     def _ingest_progress(
@@ -989,9 +1135,11 @@ class MainFrame(wx.Frame):
                 self._config.remove_pending_progress(rating_key)
                 self._last_positions.pop(rating_key, None)
             return
-        if effective >= int(duration * 0.9):
+        if effective >= int(duration * 0.97):
             self._config.remove_pending_progress(rating_key)
             self._last_positions.pop(rating_key, None)
+            if not self._closing:
+                wx.CallAfter(self._schedule_queue_refresh, 600)
             return
         if server_position is not None and server_position >= max(0, effective - 2000):
             self._config.remove_pending_progress(rating_key)

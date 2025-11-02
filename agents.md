@@ -1,5 +1,5 @@
 # Agents Playbook
-
+You are a 10X python expert, and a plex expert!
 ## Mission
 - Ship the Windows Plex client that blind and sighted users can fly without guessing.
 - Keyboard-first paths, loud state announcements, resilient playback at all costs.
