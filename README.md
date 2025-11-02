@@ -1,6 +1,6 @@
 # Plexible
 
-Plexible is a desktop Plex client built with wxPython and the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python-plexapi) fork. It supports browser-based authentication, browsing any Plex library, and streaming video or audio through an embedded web view.
+Plexible is a desktop Plex client built with wxPython and the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python-plexapi) fork. It supports browser-based authentication, browsing any Plex library, and streaming video or audio through an embedded VLC.
 
 ## Features
 - Plex account sign-in using the official browser PIN flow.
@@ -38,6 +38,17 @@ Plexible is a desktop Plex client built with wxPython and the latest [`python-pl
 - LibVLC playback requires a local VLC installation that Python can discover. Install [VLC](https://www.videolan.org/vlc/) and, if needed, set `VLC_PATH` (for the desktop app) or `PYTHON_VLC_MODULE_PATH` to point at the VLC installation directory.
 - For MPC-HC/BE fallback, install MPC-HC (or MPC-BE) and optionally set `MPC_PATH` to the player executable.
 - Signing out clears the cached token. If your token expires, simply sign out and sign back in.
+
+## Build A Standalone App (Windows or Linux)
+
+If you want a single executable you can copy around:
+
+1) From the project folder, install the bundler and build:
+
+   - `pip install pyinstaller`
+   - `pyinstaller --noconsole --onefile main.py`
+
+2) Your executable will be in the `./dist` folder when the build finishes.
 
 ## License
 
