@@ -7,8 +7,8 @@ Plexible is a desktop Plex client built with wxPython and the latest [`python-pl
 - Automatic discovery of your Plex servers and libraries.
 - Lazy-loaded navigation tree for large libraries (movies, shows, music, photos, and collections).
 - Metadata viewer with quick playback controls.
-- Embedded playback surface powered by LibVLC (with automatic fallback to VLC, MPC-HC, or the embedded browser).
-- Global search across all Plex libraries with `Ctrl+F`, plus quick server switching from the **File** menu.
+- Embedded playback surface powered by LibVLC.
+- Global search across all Plex libraries with `Ctrl+F`, plus quick server switching from the File menu.
 
 ## Getting Started
 
