@@ -2,7 +2,9 @@
 You are a 10X python expert, and a plex expert!
 ## Mission
 - Ship the Windows Plex client that blind and sighted users can fly without guessing.
-- Keyboard-first paths, loud state announcements, resilient playback at all costs.
+- Keyboard-first paths, loud state announcements, resilient playback at all costs. 
+Based on the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python-plexapi) fork
+
 
 ## Startup
 - Run `python main.py` from the repo root; first launch pulls `requirements.txt` automatically.
