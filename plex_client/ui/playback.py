@@ -135,6 +135,8 @@ except Exception:  # pragma: no cover - handled at runtime
 
 PlaybackState = dict[str, object]
 
+SEEK_STEP_MS = 10000
+
 
 class PlaybackPanel(wx.Panel):
     """Playback surface using LibVLC with automatic native fallbacks."""
@@ -156,6 +158,9 @@ class PlaybackPanel(wx.Panel):
         self._last_timeline_position: int = 0
         self._resume_offset: int = 0
         self._resume_applied: bool = False
+        self._seek_slider_duration: int = 0
+        self._updating_seek_slider: bool = False
+        self._seek_dragging: bool = False
         self._fullscreen: bool = False
         self._fullscreen_frame: Optional[wx.Frame] = None
         self._fullscreen_video_panel: Optional[wx.Panel] = None
@@ -215,6 +220,14 @@ class PlaybackPanel(wx.Panel):
         controls_bar.Add(self._fullscreen_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         controls_bar.AddStretchSpacer()
 
+        self._seek_slider = wx.Slider(self, value=0, minValue=0, maxValue=1, style=wx.SL_HORIZONTAL)
+        self._seek_slider.SetToolTip("Playback position")
+        self._seek_slider.Disable()
+        self._seek_slider.Bind(wx.EVT_SCROLL_THUMBTRACK, self._on_seek_slider_track)
+        self._seek_slider.Bind(wx.EVT_SCROLL_THUMBRELEASE, self._on_seek_slider_release)
+        self._seek_slider.Bind(wx.EVT_SCROLL_CHANGED, self._on_seek_slider_changed)
+        self._seek_slider.Bind(wx.EVT_CHAR_HOOK, self._handle_panel_char)
+
         self._video_panel = wx.Panel(self)
         self._video_panel.SetBackgroundColour(wx.BLACK)
         self._active_video_window = self._video_panel
@@ -222,11 +235,16 @@ class PlaybackPanel(wx.Panel):
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(header_row, 0, wx.ALL | wx.EXPAND, 6)
         layout.Add(controls_bar, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
+        layout.Add(self._seek_slider, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
         layout.Add(self._video_panel, 1, wx.EXPAND | wx.ALL, 6)
         self.SetSizer(layout)
 
+        self.Bind(wx.EVT_CHAR_HOOK, self._handle_panel_char)
+        self._video_panel.Bind(wx.EVT_CHAR_HOOK, self._handle_panel_char)
+
         self._update_controls_enabled()
         self._update_volume_controls()
+        self._reset_seek_slider()
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self._notify_state()
 
@@ -389,6 +407,29 @@ class PlaybackPanel(wx.Panel):
         self._notify_state()
         return applied
 
+    def seek_by(self, delta_ms: int) -> bool:
+        if self._mode != "libvlc" or not self._vlc_player or not self._current:
+            return False
+        current = self._current_position()
+        return self.seek_to(current + delta_ms)
+
+    def seek_to(self, position: int) -> bool:
+        if self._mode != "libvlc" or not self._vlc_player or not self._current:
+            return False
+        duration = self._current_duration()
+        target = max(0, int(position))
+        if duration:
+            target = min(target, duration)
+        try:
+            self._vlc_player.set_time(target)
+        except Exception as exc:
+            print(f"[LibVLC] seek_to failed: {exc}")
+            return False
+        self._resume_offset = target
+        self._resume_applied = True
+        self.force_timeline_snapshot(sync=True)
+        return True
+
     # ----------------------------------------------------------------- Event handlers
 
     def _open_stream_externally(self, _: wx.CommandEvent) -> None:
@@ -418,6 +459,32 @@ class PlaybackPanel(wx.Panel):
     def _handle_fullscreen_char(self, event: wx.KeyEvent) -> None:
         self._handle_toggle_char(event, self._fullscreen_btn, self._on_fullscreen_toggled)
 
+    def _on_seek_slider_track(self, event: wx.ScrollEvent) -> None:
+        if self._seek_slider.IsEnabled():
+            self._seek_dragging = True
+        event.Skip()
+
+    def _on_seek_slider_release(self, event: wx.ScrollEvent) -> None:
+        self._seek_dragging = False
+        self._apply_seek_from_slider()
+        event.Skip()
+
+    def _on_seek_slider_changed(self, event: wx.ScrollEvent) -> None:
+        if self._seek_dragging:
+            event.Skip()
+            return
+        self._apply_seek_from_slider()
+        event.Skip()
+
+    def _apply_seek_from_slider(self) -> None:
+        if self._updating_seek_slider or not self._seek_slider.IsEnabled():
+            return
+        if self._mode != "libvlc":
+            return
+        target = self._seek_slider.GetValue()
+        if not self.seek_to(target):
+            wx.Bell()
+
     def _handle_button_char(self, event: wx.KeyEvent, handler: Callable[[wx.CommandEvent], None], control: wx.Control) -> None:
         code = event.GetKeyCode()
         if code in (wx.WXK_SPACE, wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
@@ -436,6 +503,24 @@ class PlaybackPanel(wx.Panel):
             evt.SetEventObject(control)
             handler(evt)
             return
+        event.Skip()
+
+    def _handle_panel_char(self, event: wx.KeyEvent) -> None:
+        code = event.GetKeyCode()
+        ctrl = event.CmdDown() or event.ControlDown()
+        if ctrl:
+            if code in (ord("S"), ord("s")):
+                if not self.stop_playback():
+                    wx.Bell()
+                return
+            if code == wx.WXK_RIGHT:
+                if not self.seek_by(SEEK_STEP_MS):
+                    wx.Bell()
+                return
+            if code == wx.WXK_LEFT:
+                if not self.seek_by(-SEEK_STEP_MS):
+                    wx.Bell()
+                return
         event.Skip()
 
     def _on_play_clicked(self, _: wx.CommandEvent) -> None:
@@ -828,6 +913,7 @@ class PlaybackPanel(wx.Panel):
             self._exit_fullscreen()
         if mode != "libvlc":
             self._is_paused = False
+            self._reset_seek_slider()
         self._update_controls_enabled()
         self._update_volume_controls()
         self._notify_state()
@@ -850,6 +936,38 @@ class PlaybackPanel(wx.Panel):
         self._volume_label.SetLabel(label)
         if not self._volume_control_available():
             self._volume_slider.SetValue(self._volume)
+
+    def _reset_seek_slider(self) -> None:
+        if not hasattr(self, "_seek_slider"):
+            return
+        self._seek_slider_duration = 0
+        self._seek_dragging = False
+        self._updating_seek_slider = True
+        try:
+            self._seek_slider.Enable(False)
+            self._seek_slider.SetRange(0, 1)
+            self._seek_slider.SetValue(0)
+        finally:
+            self._updating_seek_slider = False
+
+    def _set_seek_slider(self, position: int, duration: int) -> None:
+        if not hasattr(self, "_seek_slider"):
+            return
+        if self._mode != "libvlc" or duration <= 0 or not self._current:
+            self._reset_seek_slider()
+            return
+        clamped_duration = max(1, duration)
+        clamped_position = max(0, min(position, clamped_duration))
+        self._seek_slider_duration = clamped_duration
+        self._updating_seek_slider = True
+        try:
+            if self._seek_slider.GetMax() != clamped_duration or self._seek_slider.GetMin() != 0:
+                self._seek_slider.SetRange(0, clamped_duration)
+            if not self._seek_dragging:
+                self._seek_slider.SetValue(clamped_position)
+            self._seek_slider.Enable(True)
+        finally:
+            self._updating_seek_slider = False
 
     def _notify_state(self) -> None:
         if not self._state_listener:
@@ -1066,10 +1184,11 @@ class PlaybackPanel(wx.Panel):
             self._start_timeline_poll()
 
     def _notify_timeline_state(self, state: str, position: int, duration: int, *, sync: bool = False) -> None:
-        if not self._timeline_callback or not self._current:
-            return
         duration = max(0, duration or self._current_duration())
         position = max(0, position)
+        self._set_seek_slider(position, duration)
+        if not self._timeline_callback or not self._current:
+            return
         if (
             self._last_timeline_state == state
             and abs(position - self._last_timeline_position) < 1500
@@ -1090,6 +1209,7 @@ class PlaybackPanel(wx.Panel):
     def _notify_timeline_reset(self) -> None:
         self._last_timeline_state = None
         self._last_timeline_position = 0
+        self._reset_seek_slider()
 
     def _show_libvlc(self, visible: bool) -> None:
         self._video_panel.Show(visible)

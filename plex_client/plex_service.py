@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import time
-from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from plexapi.base import PlexObject
@@ -79,10 +79,54 @@ class PlexService:
     def connect_resource(self, resource: MyPlexResource) -> PlexServer:
         if resource not in self._resources:
             self._resources.append(resource)
-        self._server = resource.connect(ssl=True)
+        server = self._connect_with_strategy(resource, reason="connect")
+        self._server = server
         self._current_resource_id = resource.clientIdentifier
         self._config.set_selected_server(resource.clientIdentifier)
-        return self._server
+        return server
+
+    def _connect_with_strategy(
+        self,
+        resource: MyPlexResource,
+        *,
+        prefer_local: bool = True,
+        reason: str = "connect",
+    ) -> PlexServer:
+        name = resource.name or resource.clientIdentifier or "Plex Server"
+        attempts: List[Tuple[str, Dict[str, Optional[object]]]] = []
+        base_locations = ["local", "remote", "relay"]
+        base_timeout = 6
+        if prefer_local:
+            attempts.append(
+                (
+                    "local-first",
+                    {"ssl": None, "timeout": base_timeout, "locations": base_locations},
+                )
+            )
+        attempts.append(
+            (
+                "secure-only",
+                {"ssl": True, "timeout": base_timeout, "locations": ["remote", "relay"]},
+            )
+        )
+        attempts.append(
+            (
+                "fallback",
+                {"ssl": None, "timeout": None, "locations": base_locations},
+            )
+        )
+        last_exc: Optional[Exception] = None
+        for label, kwargs in attempts:
+            try:
+                server = resource.connect(**kwargs)
+                print(f"[PlexService] Connected to {name} via {label} strategy.")
+                return server
+            except Exception as exc:
+                last_exc = exc
+                print(f"[PlexService] {reason} attempt '{label}' failed for {name}: {exc}")
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"Unable to connect to Plex resource '{name}'.")
 
     def ensure_server(self) -> PlexServer:
         if self._server:
@@ -534,7 +578,7 @@ class PlexService:
                 print(f"[Search] {msg}")
                 if on_status:
                     on_status(msg)
-                server = resource.connect(ssl=True)
+                server = self._connect_with_strategy(resource, reason=f"search:{name}")
             except Exception as exc:
                 msg = f"{name}: connect failed ({exc})"
                 print(f"[Search] {msg}")

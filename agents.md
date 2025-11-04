@@ -1,10 +1,13 @@
 # Agents Playbook
 You are a 10X python expert, and a plex expert!
+This client is made from
+The plex API,
+https://developer.plex.tv/
+and more spacifically, it uses pushingkarmaorg's plex python API
+https://github.com/pushingkarmaorg/python-plexapi
 ## Mission
 - Ship the Windows Plex client that blind and sighted users can fly without guessing.
-- Keyboard-first paths, loud state announcements, resilient playback at all costs. 
-Based on the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python-plexapi) fork
-
+- Keyboard-first paths, loud state announcements, resilient playback at all costs.
 
 ## Startup
 - Run `python main.py` from the repo root; first launch pulls `requirements.txt` automatically.
@@ -16,7 +19,7 @@ Based on the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python
 - Every selection refreshes metadata/status with `wx.CallAfter` so screen readers get the change immediately.
 
 ## Playback Facts
-- LibVLC is the renderer; we only fall back to the Plex HLS stream if the direct URL fails—no external players.
+- LibVLC is the renderer; if the direct URL fails we fall back to the Plex HLS stream, then the configured external player, without losing resume offsets.
 - Resume offsets apply before playback (`_maybe_seek_to_resume`) and timeline polling runs roughly every 5 seconds.
 - Fullscreen exists only for LibVLC (toolbar toggle or F11; Escape/F11 exits and focus snaps back to the player).
 
@@ -31,14 +34,16 @@ Based on the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python
 - `Space` / toolbar Play resumes; `Shift+Space` pauses; `Ctrl+.` stops.
 - `Ctrl+Up` / `Ctrl+Down` adjust volume, `Ctrl+0` toggles mute, and every change re-announces state for screen readers.
 - `F5` always reloads Continue Watching and Up Next regardless of which list owns focus.
+- Menu and toolbar buttons broadcast their new state so screen readers voice the change instantly.
 
 ## Failure Rules
 - Log every failure, announce it, fall back instantly, and never strand the transport controls.
-- If LibVLC breaks, try the Plex HLS stream and stay visible; do not spawn external players.
+- If LibVLC breaks, drop to the Plex HLS stream, then the external player, and keep the client visible the whole time.
 - When Plex API calls fail, surface the raw error (toast/dialog), log it, and keep the UI responsive.
 
 ## Hot Files
-- `main.py` — wxPython bootstrapper.
-- `plex_client/plex_service.py` — Plex auth, discovery, timeline/progress calls plus server confirmation loop.
-- `plex_client/ui/main_frame.py` — navigation, queues, shutdown flushing, progress scheduling.
-- `plex_client/ui/playback.py` — LibVLC orchestration, resume seek, timeline polling.
+- `main.py` ï¿½ wxPython bootstrapper.
+- `plex_client/plex_service.py` ï¿½ Plex auth, discovery, timeline/progress calls plus server confirmation loop.
+- `plex_client/ui/main_frame.py` ï¿½ navigation, queues, shutdown flushing, progress scheduling.
+- `plex_client/ui/playback.py` ï¿½ LibVLC orchestration, resume seek, timeline polling.
+

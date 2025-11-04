@@ -52,6 +52,7 @@ class SearchResultsDialog(wx.Dialog):
         cancel_button.Bind(wx.EVT_BUTTON, self._on_cancel)
         self.Bind(wx.EVT_CLOSE, self._on_window_close)
         self._list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_activate)
+        self._list.Bind(wx.EVT_CHAR_HOOK, self._on_list_char)
 
     def EndModal(self, retCode: int) -> None:  # type: ignore[override]
         if self._closed:
@@ -106,6 +107,16 @@ class SearchResultsDialog(wx.Dialog):
     def _on_activate(self, _: wx.CommandEvent) -> None:
         if self.selected_hit is not None:
             self.EndModal(wx.ID_OK)
+
+    def _on_list_char(self, event: wx.KeyEvent) -> None:
+        code = event.GetKeyCode()
+        if code in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if self.selected_hit is not None:
+                self.EndModal(wx.ID_OK)
+            else:
+                wx.Bell()
+            return
+        event.Skip()
 
     @property
     def selected_hit(self) -> Optional[SearchHit]:
@@ -224,7 +235,7 @@ class MainFrame(wx.Frame):
         player_menu = wx.Menu()
         self._player_play_item = player_menu.Append(wx.ID_ANY, "Play\tSpace")
         self._player_pause_item = player_menu.Append(wx.ID_ANY, "Pause\tShift+Space")
-        self._player_stop_item = player_menu.Append(wx.ID_STOP, "Stop\tCtrl+.")
+        self._player_stop_item = player_menu.Append(wx.ID_STOP, "Stop\tCtrl+S")
         player_menu.AppendSeparator()
         self._player_volume_up_item = player_menu.Append(wx.ID_ANY, "Volume Up\tCtrl+Up")
         self._player_volume_down_item = player_menu.Append(wx.ID_ANY, "Volume Down\tCtrl+Down")
@@ -249,8 +260,21 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._handle_player_mute, self._player_mute_item)
         self.Bind(wx.EVT_MENU, self._handle_player_fullscreen, self._player_fullscreen_item)
 
+        self._install_accelerators()
         self._update_menu_state()
         self._refresh_player_menu()
+
+    def _install_accelerators(self) -> None:
+        entries = [
+            (wx.ACCEL_CTRL, ord("S"), self._player_stop_item.GetId()),
+            (wx.ACCEL_CTRL, wx.WXK_UP, self._player_volume_up_item.GetId()),
+            (wx.ACCEL_CTRL, wx.WXK_DOWN, self._player_volume_down_item.GetId()),
+            (wx.ACCEL_CTRL, ord("0"), self._player_mute_item.GetId()),
+        ]
+        try:
+            self.SetAcceleratorTable(wx.AcceleratorTable(entries))
+        except Exception:
+            pass
 
     def _initialise_account(self) -> None:
         try:
@@ -348,6 +372,17 @@ class MainFrame(wx.Frame):
 
     def _on_navigation_key(self, event: wx.KeyEvent) -> None:
         code = event.GetKeyCode()
+        if code == wx.WXK_RIGHT:
+            item = self._nav_tree.GetSelection()
+            if item and item.IsOk():
+                if not self._nav_tree.IsExpanded(item):
+                    self._nav_tree.expand_with_focus(item)
+                else:
+                    child = self._nav_tree.first_real_child(item)
+                    if child and child.IsOk():
+                        self._nav_tree.SelectItem(child)
+                        self._nav_tree.EnsureVisible(child)
+                return
         if code in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if self._service and self._selected_object:
                 if self._play_selected_object(self._selected_object):
@@ -540,6 +575,116 @@ class MainFrame(wx.Frame):
         if playable:
             self._playback_panel.stop()
         self._refresh_player_menu()
+        self._focus_navigation_on_item(item)
+
+    def _focus_navigation_on_item(self, item: PlexObject) -> None:
+        if not self._service:
+            return
+        server = self._service.ensure_server()  # type: ignore[union-attr]
+
+        def worker() -> None:
+            resolved = self._resolve_item_for_navigation(server, item)
+            if not resolved:
+                return
+            lineage = self._build_navigation_lineage(server, resolved)
+            if not lineage:
+                return
+            wx.CallAfter(self._nav_tree.focus_path, lineage)
+
+        threading.Thread(target=worker, name="PlexNavFocus", daemon=True).start()
+
+    def _resolve_item_for_navigation(self, server: PlexServer, item: PlexObject) -> Optional[PlexObject]:
+        for attr in ("key", "ratingKey"):
+            value = getattr(item, attr, None)
+            if not value:
+                continue
+            try:
+                return server.fetchItem(str(value))
+            except Exception:
+                continue
+        return item
+
+    def _build_navigation_lineage(self, server: PlexServer, item: PlexObject) -> List[PlexObject]:
+        lineage: List[PlexObject] = []
+        try:
+            section = item.section()
+        except Exception:
+            section = None
+        if isinstance(section, PlexObject):
+            lineage.append(section)
+        current = item
+        ancestors: List[PlexObject] = []
+        seen: Set[str] = set()
+        while isinstance(current, PlexObject):
+            identifier = self._navigation_identifier(current)
+            if identifier in seen:
+                break
+            seen.add(identifier)
+            ancestors.append(current)
+            parent = self._resolve_parent_object(server, current)
+            if not parent:
+                break
+            current = parent
+        ancestors.reverse()
+        for obj in ancestors:
+            if not lineage or self._navigation_identifier(lineage[-1]) != self._navigation_identifier(obj):
+                lineage.append(obj)
+        return lineage
+
+    def _resolve_parent_object(self, server: PlexServer, obj: PlexObject) -> Optional[PlexObject]:
+        obj_type = getattr(obj, "type", "")
+        attr_map = {
+            "episode": ("season", "show"),
+            "season": ("show",),
+            "track": ("album", "artist"),
+            "album": ("artist",),
+            "clip": ("parent",),
+            "photo": ("parent",),
+            "collection": ("parent",),
+        }
+        for attr in attr_map.get(obj_type, ("parent",)):
+            candidate = self._safe_lookup(obj, attr)
+            resolved = self._ensure_object(server, candidate)
+            if resolved:
+                return resolved
+        for attr in ("parentRatingKey", "grandparentRatingKey", "parentKey", "grandparentKey"):
+            key = getattr(obj, attr, None)
+            resolved = self._ensure_object(server, key)
+            if resolved:
+                return resolved
+        return None
+
+    def _safe_lookup(self, obj: PlexObject, attr: str) -> Optional[object]:
+        try:
+            value = getattr(obj, attr, None)
+        except Exception:
+            return None
+        if callable(value):
+            try:
+                return value()
+            except Exception:
+                return None
+        return value
+
+    def _ensure_object(self, server: PlexServer, value: Optional[object]) -> Optional[PlexObject]:
+        if isinstance(value, PlexObject):
+            return value
+        if value is None:
+            return None
+        try:
+            return server.fetchItem(str(value))
+        except Exception:
+            return None
+
+    def _navigation_identifier(self, obj: PlexObject) -> str:
+        for attr in ("ratingKey", "key", "uuid", "guid"):
+            try:
+                value = getattr(obj, attr, None)
+            except Exception:
+                value = None
+            if value:
+                return str(value)
+        return str(id(obj))
 
     def _format_search_result(self, hit: SearchHit) -> str:
         item = hit.item
