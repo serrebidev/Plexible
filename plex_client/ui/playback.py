@@ -262,6 +262,7 @@ class PlaybackPanel(wx.Panel):
             "can_pause": self._can_control_transport() and not self._is_paused,
             "can_stop": self._mode != "stopped" or self._current is not None,
             "can_volume": self._volume_control_available(),
+            "can_seek": self._can_control_transport(),
             "muted": self._muted,
             "volume": self._volume,
             "fullscreen": self._fullscreen,
@@ -427,7 +428,7 @@ class PlaybackPanel(wx.Panel):
             return False
         self._resume_offset = target
         self._resume_applied = True
-        self.force_timeline_snapshot(sync=True)
+        self.force_timeline_snapshot(sync=True, position=target)
         return True
 
     # ----------------------------------------------------------------- Event handlers
@@ -998,22 +999,23 @@ class PlaybackPanel(wx.Panel):
         return max(0, duration)
 
     def _current_position(self) -> int:
-        position = max(0, self._last_timeline_position)
+        fallback = max(0, self._last_timeline_position)
         if self._mode == "libvlc" and self._vlc_player:
             try:
                 vlc_time = int(self._vlc_player.get_time())
             except Exception:
-                vlc_time = 0
-            if vlc_time > position:
-                position = vlc_time
-        return position
+                vlc_time = -1
+            if vlc_time >= 0:
+                return max(0, vlc_time)
+        return fallback
 
-    def force_timeline_snapshot(self, sync: bool = True) -> None:
+    def force_timeline_snapshot(self, sync: bool = True, position: Optional[int] = None) -> None:
         if not self._current:
             return
-        position = self._current_position()
+        if position is None:
+            position = self._current_position()
         duration = self._current_duration()
-        self._notify_timeline_state("playing", position, duration, sync=sync)
+        self._notify_timeline_state("playing", max(0, int(position)), duration, sync=sync)
 
     def _handle_playback_start(self, mode: str) -> None:
         if not self._current:

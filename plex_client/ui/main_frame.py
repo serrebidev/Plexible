@@ -134,7 +134,7 @@ class SearchResultsDialog(wx.Dialog):
         return bool(self._hits)
 from .content_panel import MetadataPanel, QueuesPanel
 from .navigation import NavigationTree
-from .playback import PlaybackPanel
+from .playback import PlaybackPanel, SEEK_STEP_MS
 
 
 class MainFrame(wx.Frame):
@@ -236,6 +236,8 @@ class MainFrame(wx.Frame):
         self._player_play_item = player_menu.Append(wx.ID_ANY, "Play\tSpace")
         self._player_pause_item = player_menu.Append(wx.ID_ANY, "Pause\tShift+Space")
         self._player_stop_item = player_menu.Append(wx.ID_STOP, "Stop\tCtrl+S")
+        self._player_rewind_item = player_menu.Append(wx.ID_ANY, "Rewind 10s\tCtrl+Left")
+        self._player_fast_forward_item = player_menu.Append(wx.ID_ANY, "Fast Forward 10s\tCtrl+Right")
         player_menu.AppendSeparator()
         self._player_volume_up_item = player_menu.Append(wx.ID_ANY, "Volume Up\tCtrl+Up")
         self._player_volume_down_item = player_menu.Append(wx.ID_ANY, "Volume Down\tCtrl+Down")
@@ -255,6 +257,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._handle_player_play, self._player_play_item)
         self.Bind(wx.EVT_MENU, self._handle_player_pause, self._player_pause_item)
         self.Bind(wx.EVT_MENU, self._handle_player_stop, self._player_stop_item)
+        self.Bind(wx.EVT_MENU, self._handle_player_rewind, self._player_rewind_item)
+        self.Bind(wx.EVT_MENU, self._handle_player_fast_forward, self._player_fast_forward_item)
         self.Bind(wx.EVT_MENU, self._handle_player_volume_up, self._player_volume_up_item)
         self.Bind(wx.EVT_MENU, self._handle_player_volume_down, self._player_volume_down_item)
         self.Bind(wx.EVT_MENU, self._handle_player_mute, self._player_mute_item)
@@ -267,6 +271,8 @@ class MainFrame(wx.Frame):
     def _install_accelerators(self) -> None:
         entries = [
             (wx.ACCEL_CTRL, ord("S"), self._player_stop_item.GetId()),
+            (wx.ACCEL_CTRL, wx.WXK_LEFT, self._player_rewind_item.GetId()),
+            (wx.ACCEL_CTRL, wx.WXK_RIGHT, self._player_fast_forward_item.GetId()),
             (wx.ACCEL_CTRL, wx.WXK_UP, self._player_volume_up_item.GetId()),
             (wx.ACCEL_CTRL, wx.WXK_DOWN, self._player_volume_down_item.GetId()),
             (wx.ACCEL_CTRL, ord("0"), self._player_mute_item.GetId()),
@@ -1077,10 +1083,13 @@ class MainFrame(wx.Frame):
         can_pause = bool(state.get("can_pause", False))
         can_stop = bool(state.get("can_stop", False))
         can_volume = bool(state.get("can_volume", False))
+        can_seek = bool(state.get("can_seek", False))
         muted = bool(state.get("muted", False))
         self._player_play_item.Enable(can_play)
         self._player_pause_item.Enable(can_pause)
         self._player_stop_item.Enable(can_stop)
+        self._player_rewind_item.Enable(can_seek)
+        self._player_fast_forward_item.Enable(can_seek)
         self._player_volume_up_item.Enable(can_volume)
         self._player_volume_down_item.Enable(can_volume)
         self._player_mute_item.Enable(can_volume)
@@ -1100,6 +1109,16 @@ class MainFrame(wx.Frame):
 
     def _handle_player_stop(self, _: wx.CommandEvent) -> None:
         if not self._playback_panel.stop_playback():
+            wx.Bell()
+        self._refresh_player_menu()
+
+    def _handle_player_rewind(self, _: wx.CommandEvent) -> None:
+        if not self._playback_panel.seek_by(-SEEK_STEP_MS):
+            wx.Bell()
+        self._refresh_player_menu()
+
+    def _handle_player_fast_forward(self, _: wx.CommandEvent) -> None:
+        if not self._playback_panel.seek_by(SEEK_STEP_MS):
             wx.Bell()
         self._refresh_player_menu()
 
