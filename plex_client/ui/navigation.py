@@ -2,23 +2,26 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import wx
 
 from plexapi.base import PlexObject
-from plexapi.library import LibrarySection
+from plexapi.library import Folder, LibrarySection
+
+from ..plex_service import MusicAlphaBucket, MusicCategory, MusicRadioOption
 
 
 @dataclass
 class NodePayload:
     kind: str
-    plex_object: Optional[PlexObject]
+    plex_object: Optional[object]
     identifier: str
+    queue_index: Optional[int] = None
 
 
-TreeLoader = Callable[[PlexObject], Iterable[PlexObject]]
-SelectionHandler = Callable[[Optional[PlexObject]], None]
+TreeLoader = Callable[[object], Iterable[object]]
+SelectionHandler = Callable[[Optional[object]], None]
 
 
 class NavigationTree(wx.TreeCtrl):
@@ -37,6 +40,11 @@ class NavigationTree(wx.TreeCtrl):
         self._on_selection = on_selection
         self._root = self.AddRoot("root")
         self._destroyed = False
+        self._queue_root: Optional[wx.TreeItemId] = None
+        self._queue_items: List[PlexObject] = []
+        self._queue_index_map: Dict[int, wx.TreeItemId] = {}
+        self._queue_selected_index: int = -1
+        self._queue_saved_index: int = -1
         self.Bind(wx.EVT_TREE_ITEM_EXPANDING, self._handle_expanding)
         self.Bind(wx.EVT_TREE_SEL_CHANGED, self._handle_selection)
         self.Bind(wx.EVT_WINDOW_DESTROY, self._handle_destroy)
@@ -62,9 +70,115 @@ class NavigationTree(wx.TreeCtrl):
             self.DeleteChildren(self._root)
         except RuntimeError:
             return
+        self._queue_root = None
+        self._queue_items.clear()
+        self._queue_index_map.clear()
+        self._queue_selected_index = -1
+        self._queue_saved_index = -1
+
+    def set_queue_items(self, items: Sequence[PlexObject]) -> None:
+        if self._destroyed:
+            return
+        items = list(items)
+        if not items:
+            self._queue_items.clear()
+            self._queue_index_map.clear()
+            if self._queue_root and self._queue_root.IsOk():
+                try:
+                    self.Delete(self._queue_root)
+                except RuntimeError:
+                    pass
+            self._queue_root = None
+            self._queue_selected_index = -1
+            self._queue_saved_index = -1
+            return
+
+        root = self._ensure_queue_root()
+        if not root or not root.IsOk():
+            return
+        selected_item = self.GetSelection()
+        selected_payload = self._payload(selected_item)
+        selected_is_queue = bool(
+            selected_payload and selected_payload.kind in {"queue_root", "queue_item"}
+        )
+        selected_index = (
+            selected_payload.queue_index
+            if selected_payload and selected_payload.queue_index is not None
+            else self._queue_saved_index
+        )
+
+        self._queue_items = list(items)
+        self._queue_index_map.clear()
+        try:
+            self.DeleteChildren(root)
+        except RuntimeError:
+            return
+        for idx, plex_object in enumerate(self._queue_items):
+            label = self._format_queue_label(plex_object, idx)
+            identifier = f"queue-{idx}-{self._identify(plex_object)}"
+            payload = NodePayload(
+                kind="queue_item",
+                plex_object=plex_object,
+                identifier=identifier,
+                queue_index=idx,
+            )
+            try:
+                item = self.AppendItem(root, label, data=payload)
+            except RuntimeError:
+                continue
+            self._queue_index_map[idx] = item
+        try:
+            self.Expand(root)
+        except RuntimeError:
+            pass
+        previous_saved = self._queue_saved_index
+        if selected_index >= 0:
+            self._queue_saved_index = min(selected_index, len(self._queue_items) - 1)
+        elif previous_saved >= 0:
+            self._queue_saved_index = min(previous_saved, len(self._queue_items) - 1)
+        else:
+            self._queue_saved_index = -1
+        if selected_is_queue and self._queue_saved_index >= 0:
+            self.highlight_queue_index(self._queue_saved_index, focus=False)
+        else:
+            self._queue_selected_index = -1
+
+    def highlight_queue_index(self, index: int, *, focus: bool = False) -> bool:
+        if (
+            self._destroyed
+            or not self._queue_root
+            or not self._queue_root.IsOk()
+            or index < 0
+            or index >= len(self._queue_items)
+        ):
+            return False
+        item = self._queue_index_map.get(index)
+        if not item or not item.IsOk():
+            return False
+        try:
+            self.SelectItem(item)
+        except RuntimeError:
+            return False
+        try:
+            self.EnsureVisible(item)
+        except RuntimeError:
+            pass
+        if focus:
+            try:
+                self.SetFocus()
+            except RuntimeError:
+                pass
+        self._queue_selected_index = index
+        self._queue_saved_index = index
+        return True
 
     def _wrap(self, kind: str, plex_object: Optional[PlexObject]) -> NodePayload:
-        return NodePayload(kind=kind, plex_object=plex_object, identifier=self._identify(plex_object))
+        return NodePayload(
+            kind=kind,
+            plex_object=plex_object,
+            identifier=self._identify(plex_object),
+            queue_index=None,
+        )
 
     def _payload(self, item: wx.TreeItemId) -> Optional[NodePayload]:
         if self._destroyed:
@@ -88,7 +202,7 @@ class NavigationTree(wx.TreeCtrl):
             return
         self._populate_children(item, payload.plex_object)
 
-    def _populate_children(self, item: wx.TreeItemId, plex_object: PlexObject) -> None:
+    def _populate_children(self, item: wx.TreeItemId, plex_object: object) -> None:
         if self._destroyed:
             return
         try:
@@ -106,7 +220,7 @@ class NavigationTree(wx.TreeCtrl):
 
         threading.Thread(target=work, name="PlexTreeLoader", daemon=True).start()
 
-    def _apply_children(self, item: wx.TreeItemId, children: Iterable[PlexObject]) -> None:
+    def _apply_children(self, item: wx.TreeItemId, children: Iterable[object]) -> None:
         if self._destroyed or not item or not item.IsOk():
             return
         try:
@@ -114,14 +228,58 @@ class NavigationTree(wx.TreeCtrl):
         except RuntimeError:
             return
         for child in children:
-            child_type = getattr(child, "type", "item")
-            label = getattr(child, "title", str(child))
+            child_type = getattr(child, "type", "") or ("folder" if isinstance(child, Folder) else "item")
+            label = getattr(child, "title", None) or getattr(child, "label", None) or str(child)
             try:
                 child_item = self.AppendItem(item, label, data=self._wrap(child_type, child))
             except RuntimeError:
                 continue
             if self._is_expandable(child):
                 self._add_placeholder(child_item)
+
+    def _ensure_queue_root(self) -> Optional[wx.TreeItemId]:
+        if self._destroyed:
+            return None
+        if self._queue_root and self._queue_root.IsOk():
+            return self._queue_root
+        payload = NodePayload(kind="queue_root", plex_object=None, identifier="queue-root")
+        try:
+            self._queue_root = self.PrependItem(self._root, "Now Playing", data=payload)
+        except RuntimeError:
+            try:
+                self._queue_root = self.AppendItem(self._root, "Now Playing", data=payload)
+            except RuntimeError:
+                self._queue_root = None
+        if self._queue_root and self._queue_root.IsOk():
+            try:
+                self.SetItemBold(self._queue_root, True)
+            except RuntimeError:
+                pass
+        return self._queue_root
+
+    def _format_queue_label(self, plex_object: PlexObject, index: int) -> str:
+        title = getattr(plex_object, "title", None) or getattr(plex_object, "name", None) or "Untitled"
+        return f"{index + 1:02d}. {title}"
+
+    def selection_is_queue(self) -> bool:
+        payload = self._payload(self.GetSelection())
+        return bool(payload and payload.kind in {"queue_root", "queue_item"})
+
+    def last_queue_index(self) -> int:
+        return self._queue_saved_index
+
+    def remember_queue_index(self, index: int) -> None:
+        if not self._queue_items:
+            self._queue_saved_index = -1
+            return
+        if index < 0:
+            self._queue_saved_index = -1
+            return
+        self._queue_saved_index = min(index, len(self._queue_items) - 1)
+
+    def selected_queue_index(self) -> Optional[int]:
+        return self._queue_selected_index if self._queue_selected_index >= 0 else None
+
 
     def _show_error(self, item: wx.TreeItemId, exc: Exception) -> None:
         if self._destroyed or not item or not item.IsOk():
@@ -138,6 +296,13 @@ class NavigationTree(wx.TreeCtrl):
             return
         payload = self._payload(item)
         plex_object = payload.plex_object if payload else None
+        if payload and payload.kind == "queue_item" and payload.queue_index is not None:
+            self._queue_selected_index = payload.queue_index
+            self._queue_saved_index = payload.queue_index
+        elif payload and payload.kind == "queue_root":
+            self._queue_selected_index = -1
+        else:
+            self._queue_selected_index = -1
         self._on_selection(plex_object)
 
     def _add_placeholder(self, item: wx.TreeItemId) -> None:
@@ -158,7 +323,9 @@ class NavigationTree(wx.TreeCtrl):
             child, cookie = self.GetNextChild(item, cookie)
         return False
 
-    def _is_expandable(self, plex_object: PlexObject) -> bool:
+    def _is_expandable(self, plex_object: object) -> bool:
+        if isinstance(plex_object, (MusicCategory, MusicAlphaBucket)):
+            return True
         media_type = getattr(plex_object, "type", "")
         return media_type in {
             "show",
@@ -167,7 +334,7 @@ class NavigationTree(wx.TreeCtrl):
             "album",
             "photoalbum",
             "collection",
-        } or isinstance(plex_object, LibrarySection)
+        } or isinstance(plex_object, (LibrarySection, Folder))
 
     def expand_with_focus(self, item: wx.TreeItemId) -> None:
         if self._destroyed or not item or not item.IsOk():
@@ -247,10 +414,10 @@ class NavigationTree(wx.TreeCtrl):
             return
         wx.CallAfter(self._focus_path_step, lineage, index + 1, child_item)
 
-    def _identify(self, plex_object: Optional[PlexObject]) -> str:
+    def _identify(self, plex_object: Optional[object]) -> str:
         if not plex_object:
             return ""
-        for attr in ("ratingKey", "key", "uuid", "guid"):
+        for attr in ("identifier", "ratingKey", "key", "uuid", "guid"):
             try:
                 value = getattr(plex_object, attr, None)
             except Exception:
@@ -270,7 +437,7 @@ class NavigationTree(wx.TreeCtrl):
             child, cookie = self.GetNextChild(parent, cookie)
         return None
 
-    def _apply_children_from_list(self, item: wx.TreeItemId, children: Iterable[PlexObject]) -> None:
+    def _apply_children_from_list(self, item: wx.TreeItemId, children: Iterable[object]) -> None:
         if self._destroyed or not item or not item.IsOk():
             return
         try:
@@ -278,11 +445,12 @@ class NavigationTree(wx.TreeCtrl):
         except RuntimeError:
             return
         for child in children:
-            child_type = getattr(child, "type", "item")
-            label = getattr(child, "title", str(child))
+            child_type = getattr(child, "type", "") or ("folder" if isinstance(child, Folder) else "item")
+            label = getattr(child, "title", None) or getattr(child, "label", None) or str(child)
             try:
                 child_item = self.AppendItem(item, label, data=self._wrap(child_type, child))
             except RuntimeError:
                 continue
             if self._is_expandable(child):
                 self._add_placeholder(child_item)
+

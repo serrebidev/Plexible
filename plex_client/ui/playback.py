@@ -7,15 +7,22 @@ import shutil
 import zipfile
 import struct
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 import wx
 
 from ..config import ConfigStore
 from ..plex_service import PlayableMedia
+
+@dataclass
+class QueueNodePayload:
+    kind: str
+    queue_index: Optional[int] = None
+
 
 _LIBVLC_BOOTSTRAPPED = False
 _PORTABLE_VLC_VERSION = "3.0.20"
@@ -141,7 +148,13 @@ SEEK_STEP_MS = 10000
 class PlaybackPanel(wx.Panel):
     """Playback surface using LibVLC with automatic native fallbacks."""
 
-    def __init__(self, parent: wx.Window, config: ConfigStore) -> None:
+    def __init__(
+        self,
+        parent: wx.Window,
+        config: ConfigStore,
+        *,
+        on_queue_activate: Optional[Callable[[int], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self._config = config
         self._current: Optional[PlayableMedia] = None
@@ -180,6 +193,7 @@ class PlaybackPanel(wx.Panel):
         self._libvlc_max_start_checks = 4
         self._vlc_event_manager: Optional["vlc.EventManager"] = None
         self._vlc_error_callback: Optional[Callable[[object], None]] = None
+        self._queue_activate_callback = on_queue_activate
 
         self._header = wx.StaticText(self, label="Nothing is playing.")
         header_font = self._header.GetFont()
@@ -232,11 +246,34 @@ class PlaybackPanel(wx.Panel):
         self._video_panel.SetBackgroundColour(wx.BLACK)
         self._active_video_window = self._video_panel
 
+        self._queue_panel = wx.Panel(self)
+        self._queue_panel.SetName("Queue Panel")
+        queue_box = wx.StaticBoxSizer(wx.StaticBox(self._queue_panel, label="Current Queue"), wx.VERTICAL)
+        self._queue_tree = wx.TreeCtrl(
+            self._queue_panel,
+            style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_SINGLE,
+        )
+        self._queue_tree.SetName("Current Queue")
+        self._queue_tree.SetMinSize((0, 150))
+        self._queue_root = self._queue_tree.AddRoot("Queue Root")
+        self._queue_tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self._on_queue_item_activated)
+        self._queue_tree.Bind(wx.EVT_TREE_SEL_CHANGED, self._on_queue_item_selected)
+        self._queue_tree.Bind(wx.EVT_CHAR_HOOK, self._handle_queue_char)
+        queue_box.Add(self._queue_tree, 1, wx.EXPAND)
+        self._queue_panel.SetSizer(queue_box)
+        self._queue_panel.Hide()
+        self._queue_items: list[object] = []
+        self._queue_index_map: Dict[int, wx.TreeItemId] = {}
+        self._queue_selected_index = -1
+        self._queue_last_focus_index = 0
+        self._queue_suppress_events = False
+
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(header_row, 0, wx.ALL | wx.EXPAND, 6)
         layout.Add(controls_bar, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
         layout.Add(self._seek_slider, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
         layout.Add(self._video_panel, 1, wx.EXPAND | wx.ALL, 6)
+        layout.Add(self._queue_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
         self.SetSizer(layout)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._handle_panel_char)
@@ -308,6 +345,257 @@ class PlaybackPanel(wx.Panel):
         self._direct_url = None
         self._browser_url = None
         return "none"
+
+    def set_queue_items(
+        self,
+        items: list[object],
+        current_index: int = 0,
+        *,
+        focus: bool = False,
+    ) -> None:
+        """Populate the queue tree with grouped entries."""
+        self._queue_items = list(items)
+        self._queue_index_map.clear()
+        if not self._queue_items:
+            self.clear_queue()
+            return
+
+        self._queue_suppress_events = True
+        self._queue_tree.Freeze()
+        try:
+            self._queue_tree.DeleteChildren(self._queue_root)
+            parent_cache: Dict[Tuple[str, ...], wx.TreeItemId] = {}
+            for idx, plex_item in enumerate(self._queue_items):
+                path = self._queue_path_for_item(plex_item, idx)
+                if not path:
+                    path = [f"{idx + 1:02d}. Item"]
+                parent = self._queue_root
+                prefix: list[str] = []
+                for depth, segment in enumerate(path):
+                    prefix.append(segment)
+                    key = tuple(prefix)
+                    node = parent_cache.get(key)
+                    is_leaf = depth == len(path) - 1
+                    if node is None:
+                        payload = QueueNodePayload("item" if is_leaf else "group", idx if is_leaf else None)
+                        node = self._queue_tree.AppendItem(parent, segment, data=payload)
+                        parent_cache[key] = node
+                        if not is_leaf:
+                            self._queue_tree.SetItemBold(node, True)
+                    elif is_leaf:
+                        payload = self._queue_payload(node)
+                        if payload:
+                            payload.queue_index = idx
+                    parent = node
+                leaf_key = tuple(path)
+                leaf = parent_cache.get(leaf_key)
+                if leaf:
+                    self._queue_index_map[idx] = leaf
+        finally:
+            self._queue_tree.Thaw()
+            self._queue_suppress_events = False
+
+        if not self._queue_panel.IsShown():
+            self._queue_panel.Show()
+            sizer = self.GetSizer()
+            if sizer:
+                sizer.Layout()
+
+        highlight = current_index if 0 <= current_index < len(self._queue_items) else -1
+        if (
+            not focus
+            and 0 <= self._queue_selected_index < len(self._queue_items)
+        ):
+            highlight = self._queue_selected_index
+        elif not focus and self._queue_last_focus_index >= 0:
+            highlight = min(self._queue_last_focus_index, len(self._queue_items) - 1)
+        if highlight < 0:
+            highlight = 0
+
+        if focus:
+            self.focus_queue(highlight)
+        else:
+            self._highlight_queue_index(highlight)
+
+    def clear_queue(self) -> None:
+        """Hide and clear the queue tree."""
+        self._queue_items.clear()
+        self._queue_index_map.clear()
+        if hasattr(self, "_queue_tree"):
+            self._queue_tree.DeleteChildren(self._queue_root)
+        self._queue_selected_index = -1
+        self._queue_last_focus_index = 0
+        if self._queue_panel.IsShown():
+            self._queue_panel.Hide()
+            sizer = self.GetSizer()
+            if sizer:
+                sizer.Layout()
+
+    def highlight_queue_index(self, index: int) -> None:
+        """Update the selected item without rebuilding the tree."""
+        if not self._queue_items or not self._queue_panel.IsShown():
+            return
+        self._highlight_queue_index(index)
+
+    def focus_queue(self, index: Optional[int] = None) -> bool:
+        """Move focus to the queue tree for keyboard navigation."""
+        if not self._queue_items or not self._queue_panel.IsShown():
+            return False
+        target = index if index is not None else self._queue_selected_index
+        if target is None or target < 0 or target >= len(self._queue_items):
+            fallback = self._queue_last_focus_index
+            if 0 <= fallback < len(self._queue_items):
+                target = fallback
+            else:
+                target = 0
+        if self._highlight_queue_index(target):
+            self._queue_tree.SetFocus()
+            return True
+        return False
+
+    def focus_queue_from_metadata(self) -> bool:
+        """Handle metadata panel requests to move straight into the queue tree."""
+        if not self._queue_items or not self._queue_panel.IsShown():
+            return False
+        return self.focus_queue(self._queue_last_focus_index)
+
+    def _on_queue_item_activated(self, event: wx.TreeEvent) -> None:
+        item = event.GetItem()
+        payload = self._queue_payload(item)
+        if payload and payload.queue_index is not None and self._queue_activate_callback:
+            self._queue_activate_callback(payload.queue_index)
+            return
+        event.Skip()
+
+    def _handle_queue_char(self, event: wx.KeyEvent) -> None:
+        code = event.GetKeyCode()
+        if code in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            item = self._queue_tree.GetSelection()
+            payload = self._queue_payload(item)
+            if payload and payload.queue_index is not None and self._queue_activate_callback:
+                self._queue_activate_callback(payload.queue_index)
+                return
+        event.Skip()
+
+    def _on_queue_item_selected(self, event: wx.TreeEvent) -> None:
+        if self._queue_suppress_events:
+            event.Skip()
+            return
+        item = event.GetItem()
+        payload = self._queue_payload(item)
+        if payload and payload.queue_index is not None:
+            self._queue_selected_index = payload.queue_index
+            self._queue_last_focus_index = payload.queue_index
+        else:
+            self._queue_selected_index = -1
+        event.Skip()
+
+    def _highlight_queue_index(self, index: int) -> bool:
+        if not self._queue_items or not self._queue_panel.IsShown():
+            return False
+        item = self._queue_index_map.get(index)
+        if not item or not item.IsOk():
+            return False
+        self._queue_suppress_events = True
+        try:
+            self._queue_tree.UnselectAll()
+            self._expand_to_item(item)
+            self._queue_tree.SelectItem(item)
+            self._queue_tree.EnsureVisible(item)
+        finally:
+            self._queue_suppress_events = False
+        self._queue_selected_index = index
+        self._queue_last_focus_index = index
+        return True
+
+    def _queue_payload(self, item: wx.TreeItemId) -> Optional[QueueNodePayload]:
+        if not item or not item.IsOk():
+            return None
+        data = self._queue_tree.GetItemData(item)
+        return data if isinstance(data, QueueNodePayload) else None
+
+    def _expand_to_item(self, item: wx.TreeItemId) -> None:
+        parent = self._queue_tree.GetItemParent(item)
+        while parent and parent.IsOk() and parent != self._queue_root:
+            self._queue_tree.Expand(parent)
+            parent = self._queue_tree.GetItemParent(parent)
+
+    def _queue_path_for_item(self, plex_item: object, queue_index: int) -> List[str]:
+        media_type = self._coerce_label(getattr(plex_item, "type", "")).lower()
+        title = self._coerce_label(getattr(plex_item, "title", "")) or f"Item {queue_index + 1}"
+        path: List[str] = []
+        if media_type == "episode":
+            show = self._coerce_label(getattr(plex_item, "grandparentTitle", ""))
+            if show:
+                path.append(show)
+            season_value = getattr(plex_item, "parentIndex", None)
+            if season_value not in (None, "", "-1"):
+                path.append(self._format_number_label("Season ", season_value))
+            episode_value = getattr(plex_item, "index", None)
+            code_parts: List[str] = []
+            if season_value not in (None, "", "-1"):
+                code_parts.append(self._format_number_label("S", season_value, width=2))
+            if episode_value not in (None, "", "-1"):
+                code_parts.append(self._format_number_label("E", episode_value, width=2))
+            leaf = f"{queue_index + 1:02d}. "
+            if code_parts:
+                leaf += f"{''.join(code_parts)} - "
+            leaf += title
+            return path + [leaf]
+        if media_type == "track":
+            artist = (
+                self._coerce_label(getattr(plex_item, "grandparentTitle", ""))
+                or self._coerce_label(getattr(plex_item, "parentTitle", ""))
+            )
+            album = self._coerce_label(getattr(plex_item, "parentTitle", ""))
+            if artist:
+                path.append(artist)
+            if album and album != artist:
+                path.append(album)
+            path.append(f"{queue_index + 1:02d}. {title}")
+            return path
+        if media_type == "movie":
+            year = getattr(plex_item, "year", None)
+            if year not in (None, "", "-1"):
+                try:
+                    year_text = f"{int(year)}"
+                except Exception:
+                    year_text = self._coerce_label(year)
+                leaf = f"{queue_index + 1:02d}. {title} ({year_text})"
+            else:
+                leaf = f"{queue_index + 1:02d}. {title}"
+            return [leaf]
+        if media_type == "clip":
+            series = (
+                self._coerce_label(getattr(plex_item, "grandparentTitle", ""))
+                or self._coerce_label(getattr(plex_item, "parentTitle", ""))
+            )
+            if series:
+                path.append(series)
+            path.append(f"{queue_index + 1:02d}. {title}")
+            return path
+        container = (
+            self._coerce_label(getattr(plex_item, "grandparentTitle", ""))
+            or self._coerce_label(getattr(plex_item, "parentTitle", ""))
+        )
+        if container:
+            path.append(container)
+        path.append(f"{queue_index + 1:02d}. {title}")
+        return path
+
+    def _coerce_label(self, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    def _format_number_label(self, prefix: str, value: object, width: Optional[int] = None) -> str:
+        try:
+            number = int(value)
+            if width is not None and number >= 0:
+                return f"{prefix}{number:0{width}d}"
+            return f"{prefix}{number}"
+        except Exception:
+            return f"{prefix}{value}"
 
     def stop(self) -> None:
         if self._mode == "stopped" and not self._current:

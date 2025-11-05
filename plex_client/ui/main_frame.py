@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple, cast
 
 import wx
 
 from plexapi.base import PlexObject
+from plexapi.library import LibrarySection
 from plexapi.myplex import MyPlexAccount, MyPlexResource
 from plexapi.server import PlexServer
 
 from ..auth import AuthError, AuthManager
 from ..config import ConfigStore
-from ..plex_service import PlayableMedia, PlexService, SearchHit
+from ..plex_service import (
+    MusicAlphaBucket,
+    MusicCategory,
+    MusicRadioOption,
+    MusicRadioStation,
+    PlayableMedia,
+    PlexService,
+    RadioOption,
+    RadioSession,
+    SearchHit,
+)
 
 
 class SearchResultsDialog(wx.Dialog):
@@ -132,6 +143,105 @@ class SearchResultsDialog(wx.Dialog):
     @property
     def has_hits(self) -> bool:
         return bool(self._hits)
+
+
+class RadioChooserDialog(wx.Dialog):
+    """Dialog for selecting a radio station option."""
+
+    def __init__(self, parent: wx.Window, options: Iterable[RadioOption]) -> None:
+        super().__init__(parent, title="Choose Radio Station", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self._options: List[RadioOption] = list(options)
+
+        heading = wx.StaticText(self, label="Select a radio station:")
+
+        self._list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN)
+        self._list.InsertColumn(0, "Station")
+        self._list.InsertColumn(1, "Category")
+        for index, option in enumerate(self._options):
+            index_item = self._list.InsertItem(index, option.label)
+            self._list.SetItem(index_item, 1, option.category)
+        self._list.SetColumnWidth(0, 220)
+        self._list.SetColumnWidth(1, 140)
+        self._list.SetName("Radio Stations")
+
+        desc_label = wx.StaticText(self, label="Description:")
+        self._description = wx.TextCtrl(
+            self,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_NO_VSCROLL | wx.BORDER_NONE,
+        )
+        self._description.SetMinSize((260, 110))
+        self._description.SetName("Station Description")
+
+        self._start_button = wx.Button(self, wx.ID_OK, "Start")
+        self._start_button.Enable(False)
+        cancel_button = wx.Button(self, wx.ID_CANCEL, "Cancel")
+
+        button_sizer = wx.StdDialogButtonSizer()
+        button_sizer.AddButton(self._start_button)
+        button_sizer.AddButton(cancel_button)
+        button_sizer.Realize()
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(heading, 0, wx.ALL, 6)
+        sizer.Add(self._list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+        sizer.Add(desc_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+        sizer.Add(self._description, 0, wx.EXPAND | wx.ALL, 6)
+        sizer.Add(button_sizer, 0, wx.EXPAND | wx.ALL, 6)
+
+        self.SetSizerAndFit(sizer)
+        self.SetSize((480, 420))
+        self._list.SetFocus()
+
+        self._list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_select)
+        self._list.Bind(wx.EVT_LIST_ITEM_DESELECTED, self._on_deselect)
+        self._list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_activate)
+        self._list.Bind(wx.EVT_CHAR_HOOK, self._on_list_char)
+        self._start_button.Bind(wx.EVT_BUTTON, self._on_start)
+        cancel_button.Bind(wx.EVT_BUTTON, lambda _: self.EndModal(wx.ID_CANCEL))
+
+    @property
+    def selected_option(self) -> Optional[RadioOption]:
+        index = self._list.GetFirstSelected()
+        if index == wx.NOT_FOUND:
+            return None
+        return self._options[index]
+
+    def _update_description(self) -> None:
+        option = self.selected_option
+        if option:
+            self._description.SetValue(option.description or "")
+        else:
+            self._description.SetValue("")
+
+    def _on_select(self, _: wx.ListEvent) -> None:
+        self._start_button.Enable(True)
+        self._update_description()
+
+    def _on_deselect(self, _: wx.ListEvent) -> None:
+        if self._list.GetSelectedItemCount() == 0:
+            self._start_button.Enable(False)
+            self._update_description()
+
+    def _on_activate(self, _: wx.ListEvent) -> None:
+        if self.selected_option is not None:
+            self.EndModal(wx.ID_OK)
+        else:
+            wx.Bell()
+
+    def _on_list_char(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if self.selected_option is not None:
+                self.EndModal(wx.ID_OK)
+            else:
+                wx.Bell()
+            return
+        event.Skip()
+
+    def _on_start(self, _: wx.CommandEvent) -> None:
+        if self.selected_option is not None:
+            self.EndModal(wx.ID_OK)
+        else:
+            wx.Bell()
 from .content_panel import MetadataPanel, QueuesPanel
 from .navigation import NavigationTree
 from .playback import PlaybackPanel, SEEK_STEP_MS
@@ -156,16 +266,27 @@ class MainFrame(wx.Frame):
         self._timeline_threads: list[threading.Thread] = []
         self._status_message: str = ""
         self._status_bar: Optional[wx.StatusBar] = None
-        self._selected_object: Optional[PlexObject] = None
+        self._selected_object: Optional[object] = None
+        self._selected_playable: Optional[PlayableMedia] = None
         self._closing: bool = False
         self._progress_flush_active: bool = False
         self._progress_flush_timer: Optional[wx.CallLater] = None
         self._last_positions: Dict[str, int] = {}
+        self._selected_playlist: Optional[PlexObject] = None
+        self._playlist_launching: bool = False
+        self._active_playlist_key: Optional[str] = None
         self._autoplay_sources: Dict[str, str] = {}
         self._autoplay_candidates: Dict[str, PlayableMedia] = {}
         self._autoplay_flagged: Set[str] = set()
         self._autoplay_pending_source: Optional[str] = None
         self._autoplay_timer: Optional[wx.CallLater] = None
+        self._radio_options: List[RadioOption] = []
+        self._radio_loading: bool = False
+        self._radio_request_token: int = 0
+        self._radio_sessions: Dict[str, RadioSession] = {}
+        self._radio_pending_sessions: Dict[str, Tuple[RadioSession, int]] = {}
+        self._active_queue_session: Optional[RadioSession] = None
+        self._queue_last_focus_index: int = -1
         self._reset_autoplay_state()
 
         self._build_menu()
@@ -186,7 +307,11 @@ class MainFrame(wx.Frame):
 
         right_splitter = wx.SplitterWindow(right_panel, style=wx.SP_LIVE_UPDATE)
         top_splitter = wx.SplitterWindow(right_splitter, style=wx.SP_LIVE_UPDATE)
-        self._metadata_panel = MetadataPanel(top_splitter, on_play=self._start_playback)
+        self._metadata_panel = MetadataPanel(
+            top_splitter,
+            on_play=self._start_playback,
+            on_radio=self._handle_radio_action,
+        )
         self._metadata_panel.set_status_message("Connecting...")
         self._queues_panel = QueuesPanel(
             top_splitter,
@@ -197,9 +322,14 @@ class MainFrame(wx.Frame):
         top_splitter.SplitHorizontally(self._metadata_panel, self._queues_panel, sashPosition=190)
         top_splitter.SetMinimumPaneSize(150)
 
-        self._playback_panel = PlaybackPanel(right_splitter, config)
+        self._playback_panel = PlaybackPanel(
+            right_splitter,
+            config,
+            on_queue_activate=self._handle_queue_activate,
+        )
         self._playback_panel.set_state_listener(self._on_playback_state_change)
         self._playback_panel.set_timeline_callback(self._handle_timeline_update)
+        self._metadata_panel.set_queue_focus_handler(self._focus_queue_from_metadata)
         right_splitter.SplitHorizontally(top_splitter, self._playback_panel, sashPosition=320)
 
         right_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -337,7 +467,7 @@ class MainFrame(wx.Frame):
         self._refresh_watch_queues()
         self._flush_pending_progress()
 
-    def _load_children(self, plex_object: PlexObject):
+    def _load_children(self, plex_object: object):
         if not self._service:
             return []
         return self._service.list_children(plex_object)
@@ -368,13 +498,413 @@ class MainFrame(wx.Frame):
 
         threading.Thread(target=worker, name="PlexQueueLoader", daemon=True).start()
 
-    def _handle_selection(self, plex_object: Optional[PlexObject]) -> None:
+    def _handle_selection(self, plex_object: Optional[object]) -> None:
         self._selected_object = plex_object
+        self._selected_playable = None
+        self._selected_playlist = None
+        self._active_playlist_key = None
+        self._radio_options = []
+        self._radio_pending_sessions.clear()
+        self._radio_loading = False
+        if isinstance(plex_object, PlexObject):
+            queue_index = self._queue_index_for_object(plex_object)
+            if queue_index is not None:
+                self._queue_last_focus_index = queue_index
         if not self._service:
             self._metadata_panel.update_content(None, None)
+            self._metadata_panel.set_radio_state(visible=False)
             return
-        playable = self._service.to_playable(plex_object) if plex_object else None
+        playlist_candidate: Optional[PlexObject] = None
+        if isinstance(plex_object, PlexObject) and getattr(plex_object, "type", "") == "playlist":
+            playlist_candidate = plex_object
+        self._selected_playlist = playlist_candidate
+        if isinstance(plex_object, MusicCategory):
+            self._metadata_panel.update_content(plex_object, None)
+            self._metadata_panel.set_radio_state(visible=False)
+            return
+        if isinstance(plex_object, MusicAlphaBucket):
+            self._metadata_panel.update_content(plex_object, None)
+            self._metadata_panel.set_radio_state(visible=False)
+            return
+        if isinstance(plex_object, MusicRadioStation):
+            station_option = self._radio_option_from_station(plex_object)
+            self._radio_options = [station_option]
+            self._metadata_panel.update_content(plex_object, None)
+            self._metadata_panel.set_radio_state(
+                visible=True,
+                enabled=True,
+                label="Play Radio.",
+                loading=False,
+                tooltip="Start this radio station.",
+            )
+            return
+        if isinstance(plex_object, MusicRadioOption):
+            option = plex_object.option
+            description = option.description or option.label
+            self._radio_options = [option]
+            self._metadata_panel.set_status_message(description)
+            self._metadata_panel.update_content(None, None)
+            self._metadata_panel.set_radio_state(
+                visible=True,
+                enabled=True,
+                label=option.label or "Play Radio.",
+                loading=False,
+                tooltip=description,
+            )
+            return
+        playable: Optional[PlayableMedia] = None
+        if plex_object and self._service:
+            if not isinstance(plex_object, LibrarySection):
+                try:
+                    playable = self._service.resolve_playable(plex_object)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[Selection] Unable to resolve playable media: {exc}")
+                    playable = None
+        self._selected_playable = playable
         self._metadata_panel.update_content(plex_object, playable)
+        if playlist_candidate is None and plex_object is not None:
+            self._load_radio_options_async(plex_object)
+        else:
+            self._metadata_panel.set_radio_state(visible=False)
+
+    @staticmethod
+    def _radio_option_from_station(station: MusicRadioStation) -> RadioOption:
+        description = station.summary or f"{station.title} radio"
+        return RadioOption(
+            id=f"station:{station.identifier}",
+            label=station.title,
+            description=description,
+            category=station.category or "Stations",
+            action="station",
+            data={"station": station},
+        )
+
+    def _load_radio_options_async(self, plex_object: Optional[object]) -> None:
+        if not self._service:
+            self._metadata_panel.set_radio_state(visible=False)
+            return
+        target_object = plex_object if isinstance(plex_object, PlexObject) else None
+        if target_object is None:
+            self._metadata_panel.set_radio_state(visible=False)
+            return
+        self._radio_loading = True
+        self._radio_request_token += 1
+        request_token = self._radio_request_token
+        self._metadata_panel.set_radio_state(
+            visible=True,
+            enabled=False,
+            label="Radio…",
+            loading=True,
+            tooltip="Loading radio stations…",
+        )
+
+        def worker(target: Optional[PlexObject], token: int) -> None:
+            try:
+                options = self._service.radio_options_for(target)
+                error: Optional[str] = None
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Radio] Unable to enumerate radio options: {exc}")
+                options = []
+                error = str(exc)
+            wx.CallAfter(self._apply_radio_options, token, options, error)
+
+        threading.Thread(
+            target=worker,
+            args=(target_object, request_token),
+            name="PlexRadioOptions",
+            daemon=True,
+        ).start()
+
+    def _apply_radio_options(
+        self,
+        token: int,
+        options: List[RadioOption],
+        error: Optional[str],
+    ) -> None:
+        if token != self._radio_request_token:
+            return
+        self._radio_loading = False
+        self._radio_options = options
+        if error:
+            tooltip = f"Radio unavailable: {error}"
+            self._metadata_panel.set_radio_state(
+                visible=True,
+                enabled=False,
+                label="Radio…",
+                loading=False,
+                tooltip=tooltip,
+            )
+            return
+        if options:
+            self._metadata_panel.set_radio_state(
+                visible=True,
+                enabled=True,
+                label="Radio…",
+                loading=False,
+                tooltip="Open the radio menu.",
+            )
+        else:
+            self._metadata_panel.set_radio_state(visible=False)
+
+    def _handle_radio_action(self) -> None:
+        if self._radio_loading:
+            wx.Bell()
+            return
+        if not self._radio_options:
+            wx.MessageBox("No radio stations are available for this selection.", "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
+            return
+        if len(self._radio_options) == 1:
+            self._start_radio_option(self._radio_options[0])
+            return
+        dialog = RadioChooserDialog(self, self._radio_options)
+        try:
+            if dialog.ShowModal() == wx.ID_OK:
+                option = dialog.selected_option
+                if option:
+                    self._start_radio_option(option)
+                else:
+                    wx.Bell()
+        finally:
+            dialog.Destroy()
+
+    def _start_radio_option(self, option: RadioOption) -> None:
+        if not self._service:
+            wx.Bell()
+            return
+        self._set_status(f"Starting {option.label}…")
+        self._metadata_panel.set_radio_state(
+            visible=True,
+            enabled=False,
+            label="Radio…",
+            loading=True,
+            tooltip="Starting radio…",
+        )
+
+        def worker(selected: RadioOption, token: int) -> None:
+            try:
+                media, session = self._service.start_radio_option(selected)
+                error: Optional[str] = None
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Radio] Unable to start {selected.label}: {exc}")
+                media = None
+                session = None
+                error = str(exc)
+            wx.CallAfter(self._finish_radio_start, token, selected, media, session, error)
+
+        threading.Thread(
+            target=worker,
+            args=(option, self._radio_request_token),
+            name="PlexRadioStart",
+            daemon=True,
+        ).start()
+
+    def _finish_radio_start(
+        self,
+        token: int,
+        option: RadioOption,
+        media: Optional[PlayableMedia],
+        session: Optional[RadioSession],
+        error: Optional[str],
+    ) -> None:
+        if token != self._radio_request_token:
+            return
+        self._metadata_panel.set_radio_state(
+            visible=bool(self._radio_options),
+            enabled=bool(self._radio_options),
+            label="Radio…",
+            loading=False,
+            tooltip="Open the radio menu." if self._radio_options else None,
+        )
+        if error or not media or not session:
+            message = error or "Unknown error."
+            wx.MessageBox(
+                f"Unable to start {option.label}:\n{message}",
+                "Plexible",
+                wx.ICON_ERROR | wx.OK,
+                parent=self,
+            )
+            return
+        self._start_playback(media, preserve_queue=True)
+        self._register_radio_session(media, session)
+        self._update_queue_display(session, media, focus=False, highlight_index=session.current_index)
+        self._queue_manual_play(media)
+        self._set_status(f"Streaming {media.title} ({session.description})")
+
+    def _start_playlist_session(self, playlist: PlexObject) -> bool:
+        if not self._service:
+            wx.Bell()
+            return False
+        try:
+            media, session = self._service.start_playlist(playlist)
+        except Exception as exc:  # noqa: BLE001
+            wx.MessageBox(
+                f"Unable to start playlist '{getattr(playlist, 'title', 'Playlist')}':\n{exc}",
+                "Plexible",
+                wx.ICON_ERROR | wx.OK,
+                parent=self,
+            )
+            return False
+        self._playlist_launching = True
+        try:
+            self._start_playback(media, preserve_queue=True)
+        finally:
+            self._playlist_launching = False
+        self._metadata_panel.update_content(media.item, media)
+        self._metadata_panel.set_radio_state(visible=False)
+        self._radio_options = []
+        self._register_radio_session(media, session)
+        self._update_queue_display(session, media, focus=False, highlight_index=session.current_index)
+        self._queue_manual_play(media)
+        self._selected_playable = media
+        playlist_key = getattr(playlist, "ratingKey", None)
+        self._active_playlist_key = str(playlist_key) if playlist_key is not None else None
+        self._set_status(f"Streaming {media.title} (Playlist)")
+        return True
+
+    def _register_radio_session(
+        self,
+        media: PlayableMedia,
+        session: RadioSession,
+        *,
+        pending_index: Optional[int] = None,
+    ) -> None:
+        rating_key = getattr(media.item, "ratingKey", None)
+        if rating_key is None:
+            return
+        key = str(rating_key)
+        if session.metadata is None:
+            session.metadata = {}
+        previous_key = session.metadata.get("current_rating_key")
+        if previous_key and previous_key != key:
+            self._radio_sessions.pop(str(previous_key), None)
+        if pending_index is not None:
+            session.current_index = pending_index
+        session.metadata["current_rating_key"] = key
+        self._radio_sessions[key] = session
+        self._radio_pending_sessions.pop(key, None)
+
+    def _update_queue_display(
+        self,
+        session: Optional[RadioSession],
+        media: Optional[PlayableMedia],
+        *,
+        focus: bool = False,
+        highlight_index: Optional[int] = None,
+    ) -> None:
+        if not hasattr(self, "_playback_panel"):
+            return
+        if session is None:
+            self._active_queue_session = None
+            self._nav_tree.set_queue_items([])
+            self._queue_last_focus_index = -1
+            return
+        try:
+            queue_items = list(session.queue.items)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Radio] Unable to read queue items: {exc}")
+            self._active_queue_session = None
+            self._nav_tree.set_queue_items([])
+            self._queue_last_focus_index = -1
+            return
+        self._nav_tree.set_queue_items(queue_items)
+        if not queue_items:
+            self._active_queue_session = session
+            self._queue_last_focus_index = -1
+            return
+        previous = self._active_queue_session is session
+        if highlight_index is not None:
+            highlight = highlight_index
+        else:
+            highlight = session.current_index
+        if highlight < 0 or highlight >= len(queue_items):
+            highlight = 0
+        self._active_queue_session = session
+        should_focus = focus or not previous
+        if should_focus or self._nav_tree.selection_is_queue():
+            self._nav_tree.highlight_queue_index(highlight, focus=should_focus)
+        else:
+            self._nav_tree.remember_queue_index(highlight)
+        self._queue_last_focus_index = highlight
+
+    def _focus_queue_from_metadata(self) -> bool:
+        index = self._queue_last_focus_index
+        if index < 0:
+            index = self._nav_tree.last_queue_index()
+        return self._nav_tree.highlight_queue_index(index, focus=True)
+
+    def _handle_queue_activate(self, index: int) -> None:
+        session = self._active_queue_session
+        if not session or not self._service:
+            wx.Bell()
+            return
+        try:
+            queue_items = list(session.queue.items)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Radio] Unable to load queue during activation: {exc}")
+            wx.Bell()
+            return
+        if index < 0 or index >= len(queue_items):
+            wx.Bell()
+            return
+        queue_item = self._service._ensure_queue_item_loaded(queue_items[index])
+        playable = self._service.to_playable(queue_item)
+        if not playable:
+            wx.Bell()
+            return
+        session.current_index = index
+        was_launching = self._playlist_launching
+        self._playlist_launching = True
+        try:
+            self._start_playback(playable, preserve_queue=True)
+        finally:
+            self._playlist_launching = was_launching
+        self._register_radio_session(playable, session, pending_index=index)
+        self._metadata_panel.update_content(playable.item, playable)
+        self._metadata_panel.set_radio_state(visible=False)
+        self._queue_manual_play(playable)
+        self._selected_playable = playable
+        self._update_queue_display(session, playable, focus=True, highlight_index=index)
+
+    def _clear_radio_session_for_key(self, key: str) -> None:
+        session = self._radio_sessions.pop(key, None)
+        if not session:
+            return
+        if getattr(session, "kind", "") == "playlist":
+            self._active_playlist_key = None
+        if session.metadata:
+            session.metadata.pop("current_rating_key", None)
+        if session is self._active_queue_session:
+            self._update_queue_display(None, None)
+        for pending_key, (pending_session, _) in list(self._radio_pending_sessions.items()):
+            if pending_session is session or pending_key == key:
+                self._radio_pending_sessions.pop(pending_key, None)
+
+    def _prime_radio_autoplay(self, media: PlayableMedia, source_key: str) -> Optional[str]:
+        if not self._service:
+            return None
+        session = self._radio_sessions.get(source_key)
+        if not session:
+            return None
+        try:
+            result = self._service.next_radio_track(session)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Radio] Unable to fetch next radio track: {exc}")
+            self._clear_radio_session_for_key(source_key)
+            return None
+        if not result:
+            self._clear_radio_session_for_key(source_key)
+            return None
+        next_media, next_index = result
+        next_key_raw = getattr(next_media.item, "ratingKey", None)
+        if next_key_raw is None:
+            return None
+        next_key = str(next_key_raw)
+        self._radio_pending_sessions[next_key] = (session, next_index)
+        self._autoplay_sources[source_key] = next_key
+        self._autoplay_candidates[next_key] = next_media
+        self._config.remove_pending_progress(next_key)
+        self._last_positions.pop(next_key, None)
+        return next_key
 
     def _on_navigation_key(self, event: wx.KeyEvent) -> None:
         code = event.GetKeyCode()
@@ -390,24 +920,74 @@ class MainFrame(wx.Frame):
                         self._nav_tree.EnsureVisible(child)
                 return
         if code in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if self._nav_tree.selection_is_queue():
+                index = self._nav_tree.selected_queue_index()
+                if index is not None:
+                    self._handle_queue_activate(index)
+                    return
             if self._service and self._selected_object:
                 if self._play_selected_object(self._selected_object):
                     return
         event.Skip()
 
-    def _play_selected_object(self, plex_object: PlexObject) -> bool:
+    def _play_selected_object(self, plex_object: object) -> bool:
         if not self._service:
             return False
-        playable = self._service.to_playable(plex_object)
-        if not playable:
-            playable = self._first_playable_descendant(plex_object)
-        if playable:
-            self._start_playback(playable)
-            self._queue_manual_play(playable)
+        if isinstance(plex_object, MusicCategory) or isinstance(plex_object, MusicAlphaBucket):
+            item = self._nav_tree.GetSelection()
+            if item and item.IsOk() and not self._nav_tree.IsExpanded(item):
+                self._nav_tree.expand_with_focus(item)
+            return False
+        if isinstance(plex_object, MusicRadioStation):
+            station_option = self._radio_option_from_station(plex_object)
+            self._radio_options = [station_option]
+            self._radio_loading = False
+            self._start_radio_option(station_option)
             return True
-        return False
+        if isinstance(plex_object, MusicRadioOption):
+            option = plex_object.option
+            self._radio_options = [option]
+            self._radio_loading = False
+            self._start_radio_option(option)
+            return True
+        if isinstance(plex_object, PlexObject) and getattr(plex_object, "type", "") == "playlist":
+            return self._start_playlist_session(cast(PlexObject, plex_object))
+        playable: Optional[PlayableMedia] = None
+        if plex_object is self._selected_object and self._selected_playable:
+            playable = self._selected_playable
+        if not playable and not isinstance(plex_object, LibrarySection):
+            try:
+                playable = self._service.resolve_playable(cast(PlexObject, plex_object))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Playback] Unable to resolve selected media: {exc}")
+                playable = None
+        if not playable:
+            playable = self._first_playable_descendant(cast(PlexObject, plex_object))
+        if not playable:
+            return False
+        self._start_playback(playable)
+        self._queue_manual_play(playable)
+        if plex_object is self._selected_object:
+            self._selected_playable = playable
+        return True
 
-    def _start_playback(self, media: PlayableMedia) -> None:
+    def _start_playback(self, media: PlayableMedia, *, preserve_queue: bool = False) -> None:
+        if not preserve_queue:
+            self._active_queue_session = None
+            self._nav_tree.set_queue_items([])
+            self._queue_last_focus_index = -1
+        if (
+            not self._playlist_launching
+            and self._selected_playlist is not None
+            and self._selected_object is self._selected_playlist
+        ):
+            playlist_obj = self._selected_playlist
+            if isinstance(playlist_obj, PlexObject):
+                playlist_key = getattr(playlist_obj, "ratingKey", None)
+                key_str = str(playlist_key) if playlist_key is not None else ""
+                if not key_str or key_str != (self._active_playlist_key or ""):
+                    if self._start_playlist_session(playlist_obj):
+                        return
         rating_key = getattr(media.item, "ratingKey", None)
         if self._service and rating_key:
             pending = self._config.get_pending_entry(str(rating_key))
@@ -447,6 +1027,10 @@ class MainFrame(wx.Frame):
     def _handle_queue_selection(self, media: Optional[PlayableMedia]) -> None:
         if media:
             self._metadata_panel.update_content(media.item, media)
+            self._load_radio_options_async(media.item)
+        else:
+            self._metadata_panel.update_content(None, None)
+            self._metadata_panel.set_radio_state(visible=False)
 
     def _handle_sign_in(self, _: wx.CommandEvent) -> None:
         if self._account:
@@ -576,9 +1160,8 @@ class MainFrame(wx.Frame):
         threading.Thread(target=worker, name="PlexServerListWorker", daemon=True).start()
 
     def _display_search_result(self, item: PlexObject) -> None:
-        playable = self._service.to_playable(item) if self._service else None  # type: ignore[union-attr]
-        self._metadata_panel.update_content(item, playable)
-        if playable:
+        self._handle_selection(item)
+        if self._selected_playable:
             self._playback_panel.stop()
         self._refresh_player_menu()
         self._focus_navigation_on_item(item)
@@ -681,6 +1264,22 @@ class MainFrame(wx.Frame):
             return server.fetchItem(str(value))
         except Exception:
             return None
+
+    def _queue_index_for_object(self, obj: PlexObject) -> Optional[int]:
+        session = self._active_queue_session
+        if not session:
+            return None
+        try:
+            queue_items = list(session.queue.items)
+        except Exception:
+            return None
+        target = self._navigation_identifier(obj)
+        if not target:
+            return None
+        for idx, candidate in enumerate(queue_items):
+            if self._navigation_identifier(candidate) == target:
+                return idx
+        return None
 
     def _navigation_identifier(self, obj: PlexObject) -> str:
         for attr in ("ratingKey", "key", "uuid", "guid"):
@@ -846,6 +1445,8 @@ class MainFrame(wx.Frame):
         elif state == "stopped" and rating_key and self._autoplay_pending_source == rating_key:
             self._cancel_autoplay_timer()
             self._autoplay_pending_source = None
+        if state == "stopped" and rating_key and not near_completion:
+            self._clear_radio_session_for_key(rating_key)
 
         def update() -> None:
             local_offset: Optional[int] = None
@@ -925,6 +1526,11 @@ class MainFrame(wx.Frame):
         if raw_key is None:
             return None
         source_key = str(raw_key)
+        if source_key in self._radio_sessions:
+            next_key = self._prime_radio_autoplay(media, source_key)
+            if next_key:
+                self._autoplay_flagged.add(source_key)
+                return next_key
         existing = self._autoplay_sources.get(source_key)
         if existing and existing in self._autoplay_candidates:
             return existing
@@ -976,6 +1582,11 @@ class MainFrame(wx.Frame):
         if not next_key:
             return
         media = self._autoplay_candidates.get(next_key)
+        pending_entry = self._radio_pending_sessions.pop(next_key, None)
+        pending_session: Optional[RadioSession] = None
+        pending_index: Optional[int] = None
+        if pending_entry:
+            pending_session, pending_index = pending_entry
         if not media:
             try:
                 item = self._service.fetch_item(next_key)  # type: ignore[arg-type]
@@ -994,7 +1605,15 @@ class MainFrame(wx.Frame):
         print(f"[Autoplay] Starting next episode {next_key} (source {source_key_str})")
         self._autoplay_pending_source = None
         self._remove_autoplay_candidate(source_key=source_key_str, clear_flag=True)
-        self._start_playback(media)
+        self._start_playback(media, preserve_queue=True)
+        if pending_session:
+            self._register_radio_session(media, pending_session, pending_index=pending_index)
+            self._update_queue_display(
+                pending_session,
+                media,
+                focus=False,
+                highlight_index=pending_index if pending_index is not None else pending_session.current_index,
+            )
         self._queue_manual_play(media)
         self._set_status(f"Auto-playing next episode: {media.title}")
 
@@ -1008,6 +1627,7 @@ class MainFrame(wx.Frame):
         if next_key is not None:
             key = str(next_key)
             self._autoplay_candidates.pop(key, None)
+            self._radio_pending_sessions.pop(key, None)
             for src, mapped in list(self._autoplay_sources.items()):
                 if mapped == key:
                     self._autoplay_sources.pop(src, None)
@@ -1018,8 +1638,10 @@ class MainFrame(wx.Frame):
             mapped = self._autoplay_sources.pop(src_key, None)
             if mapped:
                 self._autoplay_candidates.pop(mapped, None)
+                self._radio_pending_sessions.pop(mapped, None)
             if clear_flag:
                 self._autoplay_flagged.discard(src_key)
+            self._clear_radio_session_for_key(src_key)
 
     def _reset_autoplay_state(self) -> None:
         self._cancel_autoplay_timer()
@@ -1027,6 +1649,11 @@ class MainFrame(wx.Frame):
         self._autoplay_candidates.clear()
         self._autoplay_flagged.clear()
         self._autoplay_pending_source = None
+        self._radio_sessions.clear()
+        self._radio_pending_sessions.clear()
+        self._active_playlist_key = None
+        self._selected_playlist = None
+        self._update_queue_display(None, None)
 
     def _queue_manual_play(self, media: PlayableMedia) -> None:
         if not self._service:
@@ -1110,6 +1737,7 @@ class MainFrame(wx.Frame):
     def _handle_player_stop(self, _: wx.CommandEvent) -> None:
         if not self._playback_panel.stop_playback():
             wx.Bell()
+        self._active_playlist_key = None
         self._refresh_player_menu()
 
     def _handle_player_rewind(self, _: wx.CommandEvent) -> None:

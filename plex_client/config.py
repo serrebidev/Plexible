@@ -92,6 +92,8 @@ class ConfigStore:
             "client_id": uuid.uuid4().hex,
             "auth_token": None,
             "selected_server": None,
+            "selected_server_name": None,
+            "preferred_servers": [],
             "vlc_path": None,
             "pending_progress": {},
         }
@@ -139,6 +141,57 @@ class ConfigStore:
             self.set("selected_server", identifier)
         else:
             self.clear("selected_server")
+
+    def get_selected_server_name(self) -> Optional[str]:
+        name = self.get("selected_server_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return None
+
+    def set_selected_server_name(self, name: Optional[str]) -> None:
+        if name and str(name).strip():
+            self.set("selected_server_name", str(name).strip())
+        else:
+            self.clear("selected_server_name")
+
+    def get_preferred_servers(self) -> list[str]:
+        stored = self.get("preferred_servers", [])
+        if not isinstance(stored, list):
+            return []
+        result: list[str] = []
+        for entry in stored:
+            if isinstance(entry, str):
+                trimmed = entry.strip()
+                if trimmed and trimmed not in result:
+                    result.append(trimmed)
+        return result
+
+    def set_preferred_servers(self, identifiers: Iterable[str]) -> None:
+        cleaned: list[str] = []
+        for identifier in identifiers:
+            if not isinstance(identifier, str):
+                continue
+            trimmed = identifier.strip()
+            if trimmed and trimmed not in cleaned:
+                cleaned.append(trimmed)
+        self.set("preferred_servers", cleaned)
+
+    def promote_preferred_server(self, primary: Optional[str], alias: Optional[str] = None) -> None:
+        tokens = self.get_preferred_servers()
+        ordered: list[str] = []
+
+        def add_token(token: Optional[str]) -> None:
+            if not isinstance(token, str):
+                return
+            trimmed = token.strip()
+            if trimmed and trimmed not in ordered:
+                ordered.append(trimmed)
+
+        add_token(primary)
+        add_token(alias)
+        for existing in tokens:
+            add_token(existing)
+        self.set("preferred_servers", ordered)
 
     def get_vlc_path(self) -> Optional[str]:
         return self.get("vlc_path")

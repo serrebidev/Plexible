@@ -10,11 +10,17 @@ from ..plex_service import PlayableMedia
 
 
 class MetadataPanel(wx.Panel):
-    """Shows metadata for the selected Plex object and exposes a play action."""
+    """Shows metadata for the selected Plex object and exposes playback actions."""
 
-    def __init__(self, parent: wx.Window, on_play: Callable[[PlayableMedia], None]) -> None:
+    def __init__(
+        self,
+        parent: wx.Window,
+        on_play: Callable[[PlayableMedia], None],
+        on_radio: Optional[Callable[[], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self._on_play = on_play
+        self._on_radio = on_radio
 
         self._title = wx.StaticText(self, label="Select an item to see details.")
         bold_font = self._title.GetFont()
@@ -23,9 +29,11 @@ class MetadataPanel(wx.Panel):
         self._title.SetFont(bold_font)
 
         self._type_label = wx.StaticText(self, label="")
+        self._queue_focus_handler: Optional[Callable[[], bool]] = None
         self._summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_NONE)
         self._summary.SetMinSize((200, 120))
         self._summary.SetName("Status")
+        self._summary.Bind(wx.EVT_NAVIGATION_KEY, self._handle_summary_navigation)
 
         self._play_button = wx.Button(self, wx.ID_ANY, label="Play")
         self._play_button.Disable()
@@ -33,15 +41,30 @@ class MetadataPanel(wx.Panel):
         self._play_button.Bind(wx.EVT_CHAR_HOOK, self._handle_play_char)
         self._play_button.Bind(wx.EVT_KEY_DOWN, self._handle_play_key)
 
+        self._radio_button = wx.Button(self, wx.ID_ANY, label="Radio…")
+        self._radio_button.Disable()
+        self._radio_button.Hide()
+        self._radio_button.Bind(wx.EVT_BUTTON, self._handle_radio)
+
+        button_row = wx.BoxSizer(wx.HORIZONTAL)
+        button_row.Add(self._play_button, 0, wx.RIGHT, 6)
+        button_row.Add(self._radio_button, 0)
+
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(self._title, 0, wx.ALL | wx.EXPAND, 8)
         layout.Add(self._type_label, 0, wx.LEFT | wx.RIGHT, 8)
         layout.Add(self._summary, 1, wx.ALL | wx.EXPAND, 8)
-        layout.Add(self._play_button, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
+        layout.Add(button_row, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizer(layout)
 
         self._current_media: Optional[PlayableMedia] = None
         self._status_text: str = ""
+        self._radio_visible: bool = False
+        self._radio_loading: bool = False
+
+    def set_queue_focus_handler(self, handler: Optional[Callable[[], bool]]) -> None:
+        """Register a callback to move focus to the playback queue."""
+        self._queue_focus_handler = handler
 
     def update_content(self, obj: Optional[PlexObject], playable: Optional[PlayableMedia]) -> None:
         if obj is None:
@@ -49,6 +72,7 @@ class MetadataPanel(wx.Panel):
             self._type_label.SetLabel("")
             self._current_media = None
             self._apply_status_text()
+            self.set_radio_state(visible=False)
             return
 
         self._title.SetLabel(getattr(obj, "title", "Untitled"))
@@ -72,6 +96,37 @@ class MetadataPanel(wx.Panel):
         self._status_text = message or ""
         if self._current_media is None:
             self._apply_status_text()
+
+    def set_radio_state(
+        self,
+        *,
+        visible: bool,
+        enabled: bool = False,
+        label: str = "Radio…",
+        loading: bool = False,
+        tooltip: Optional[str] = None,
+    ) -> None:
+        self._radio_loading = loading
+        self._radio_button.SetLabel(label)
+        self._radio_button.SetToolTip(tooltip or "")
+        if visible:
+            if not self._radio_visible:
+                self._radio_button.Show()
+                self._radio_visible = True
+                self.Layout()
+        else:
+            if self._radio_visible:
+                self._radio_button.Hide()
+                self._radio_visible = False
+                self.Layout()
+        if not visible:
+            return
+        if loading:
+            self._radio_button.Disable()
+        elif enabled and self._on_radio:
+            self._radio_button.Enable()
+        else:
+            self._radio_button.Disable()
 
     def _apply_status_text(self) -> None:
         self._summary.SetValue(self._status_text or "")
@@ -101,6 +156,25 @@ class MetadataPanel(wx.Panel):
         if code in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if self._current_media:
                 self._on_play(self._current_media)
+                return
+        event.Skip()
+
+    def _handle_radio(self, _: wx.CommandEvent) -> None:
+        if self._radio_loading:
+            wx.Bell()
+            return
+        if self._on_radio:
+            self._on_radio()
+        else:
+            wx.Bell()
+
+    def _handle_summary_navigation(self, event: wx.NavigationKeyEvent) -> None:
+        if not event.IsFromTab() or event.GetEventObject() is not self._summary:
+            event.Skip()
+            return
+        if event.GetDirection() and self._queue_focus_handler:
+            handled = self._queue_focus_handler()
+            if handled:
                 return
         event.Skip()
 
@@ -144,6 +218,11 @@ class QueuesPanel(wx.Panel):
         self._accessible_refs: List[_NamedAccessible] = []
         self._continue_label = "Continue Watching"
         self._upnext_label = "Up Next"
+        self._continue_last_key: Optional[str] = None
+        self._continue_last_index: int = -1
+        self._upnext_last_key: Optional[str] = None
+        self._upnext_last_index: int = -1
+        self._last_focus_list: Optional[str] = None
 
         self._continue_list = self._create_list()
         self._continue_list.InsertColumn(0, "Title")
@@ -185,6 +264,7 @@ class QueuesPanel(wx.Panel):
     def update_lists(self, continue_items: List[PlayableMedia], up_next_items: List[PlayableMedia]) -> None:
         self._continue_items = list(continue_items)
         self._upnext_items = list(up_next_items)
+        selection_restored = False
 
         if self._continue_items:
             self._populate_list(
@@ -194,6 +274,10 @@ class QueuesPanel(wx.Panel):
             )
             self._show_list(self._continue_list, self._continue_placeholder)
         else:
+            self._continue_last_key = None
+            self._continue_last_index = -1
+            if self._last_focus_list == "continue":
+                self._last_focus_list = None
             self._set_placeholder(
                 self._continue_list,
                 self._continue_placeholder,
@@ -208,13 +292,21 @@ class QueuesPanel(wx.Panel):
             )
             self._show_list(self._upnext_list, self._upnext_placeholder)
         else:
+            self._upnext_last_key = None
+            self._upnext_last_index = -1
+            if self._last_focus_list == "upnext":
+                self._last_focus_list = None
             self._set_placeholder(
                 self._upnext_list,
                 self._upnext_placeholder,
                 "No upcoming episodes right now.",
             )
 
-        self._on_select(None)
+        restored = self._restore_last_selection()
+        if restored is not None:
+            selection_restored = True
+        if not selection_restored:
+            self._on_select(None)
         self.Layout()
 
     def _create_list(self) -> wx.ListCtrl:
@@ -345,6 +437,10 @@ class QueuesPanel(wx.Panel):
         index = event.GetIndex()
         self._clear_selection(self._upnext_list)
         media = self._continue_items[index] if 0 <= index < len(self._continue_items) else None
+        if media:
+            self._continue_last_key = media.key
+            self._continue_last_index = index
+            self._last_focus_list = "continue"
         self._on_select(media)
         event.Skip()
 
@@ -354,6 +450,10 @@ class QueuesPanel(wx.Panel):
         index = event.GetIndex()
         self._clear_selection(self._continue_list)
         media = self._upnext_items[index] if 0 <= index < len(self._upnext_items) else None
+        if media:
+            self._upnext_last_key = media.key
+            self._upnext_last_index = index
+            self._last_focus_list = "upnext"
         self._on_select(media)
         event.Skip()
 
@@ -364,6 +464,7 @@ class QueuesPanel(wx.Panel):
             self._continue_list.GetSelectedItemCount() == 0
             and self._upnext_list.GetSelectedItemCount() == 0
         ):
+            self._last_focus_list = None
             self._on_select(None)
 
     def _on_continue_activated(self, event: wx.ListEvent) -> None:
@@ -382,3 +483,72 @@ class QueuesPanel(wx.Panel):
                 self._on_refresh()
             return
         event.Skip()
+
+    def _restore_last_selection(self) -> Optional[PlayableMedia]:
+        if self._last_focus_list == "continue":
+            return self._restore_continue_selection()
+        if self._last_focus_list == "upnext":
+            return self._restore_upnext_selection()
+        return None
+
+    def _restore_continue_selection(self) -> Optional[PlayableMedia]:
+        index = self._resolve_restore_index(self._continue_items, self._continue_last_key, self._continue_last_index)
+        if index is None:
+            return None
+        self._clear_selection(self._upnext_list)
+        if not self._select_list_index(self._continue_list, index):
+            return None
+        media = self._continue_items[index]
+        self._continue_last_index = index
+        self._continue_last_key = media.key
+        self._last_focus_list = "continue"
+        self._on_select(media)
+        return media
+
+    def _restore_upnext_selection(self) -> Optional[PlayableMedia]:
+        index = self._resolve_restore_index(self._upnext_items, self._upnext_last_key, self._upnext_last_index)
+        if index is None:
+            return None
+        self._clear_selection(self._continue_list)
+        if not self._select_list_index(self._upnext_list, index):
+            return None
+        media = self._upnext_items[index]
+        self._upnext_last_index = index
+        self._upnext_last_key = media.key
+        self._last_focus_list = "upnext"
+        self._on_select(media)
+        return media
+
+    def _resolve_restore_index(
+        self,
+        items: List[PlayableMedia],
+        last_key: Optional[str],
+        last_index: int,
+    ) -> Optional[int]:
+        if not items:
+            return None
+        if last_key:
+            for idx, media in enumerate(items):
+                if media.key == last_key:
+                    return idx
+        if last_index >= 0:
+            bounded = min(last_index, len(items) - 1)
+            if bounded >= 0:
+                return bounded
+        return None
+
+    def _select_list_index(self, list_ctrl: wx.ListCtrl, index: int) -> bool:
+        if index < 0 or index >= list_ctrl.GetItemCount():
+            return False
+        previous = self._suppress_events
+        self._suppress_events = True
+        try:
+            list_ctrl.SetItemState(
+                index,
+                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
+                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
+            )
+            list_ctrl.EnsureVisible(index)
+        finally:
+            self._suppress_events = previous
+        return True
