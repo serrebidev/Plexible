@@ -541,6 +541,7 @@ class MainFrame(wx.Frame):
         self._collection_dialog_identifier: Optional[str] = None
         self._active_queue_session: Optional[RadioSession] = None
         self._queue_last_focus_index: int = -1
+        self._playable_request_token: int = 0
         self._reset_autoplay_state()
 
         self._build_menu()
@@ -820,25 +821,20 @@ class MainFrame(wx.Frame):
                 tooltip=description,
             )
             return
-        playable: Optional[PlayableMedia] = None
-        if plex_object and self._service:
-            if not isinstance(plex_object, LibrarySection):
-                try:
-                    playable = self._service.resolve_playable(plex_object)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[Selection] Unable to resolve playable media: {exc}")
-                    playable = None
-        self._selected_playable = playable
-        self._metadata_panel.update_content(plex_object, playable)
+        self._selected_playable = None
+        self._metadata_panel.update_content(plex_object, None)
         should_load_radio = (
             playlist_candidate is None
             and isinstance(plex_object, PlexObject)
             and getattr(plex_object, "type", "") not in {"collection"}
+            and self._service.is_music_context(plex_object)
         )
         if should_load_radio:
             self._load_radio_options_async(plex_object)
         else:
             self._metadata_panel.set_radio_state(visible=False)
+        if plex_object and self._service and not isinstance(plex_object, LibrarySection):
+            self._resolve_playable_async(cast(PlexObject, plex_object))
         if collection_candidate is not None and collection_identifier:
             dialog = self._ensure_collection_dialog(collection_candidate, collection_identifier)
             dialog.show_loading("Loading collection items...")
@@ -892,6 +888,48 @@ class MainFrame(wx.Frame):
             name="PlexRadioOptions",
             daemon=True,
         ).start()
+
+    def _resolve_playable_async(self, plex_object: PlexObject) -> None:
+        self._playable_request_token += 1
+        request_token = self._playable_request_token
+        self._metadata_panel.set_status_message("Loading playback details...")
+
+        def worker(target: PlexObject, token: int) -> None:
+            try:
+                playable = self._service.resolve_playable(target)
+                error: Optional[str] = None
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Selection] Unable to resolve playable media: {exc}")
+                playable = None
+                error = str(exc)
+            wx.CallAfter(self._apply_resolved_playable, target, playable, token, error)
+
+        threading.Thread(
+            target=worker,
+            args=(plex_object, request_token),
+            name="PlexPlayableResolver",
+            daemon=True,
+        ).start()
+
+    def _apply_resolved_playable(
+        self,
+        plex_object: PlexObject,
+        playable: Optional[PlayableMedia],
+        token: int,
+        error: Optional[str],
+    ) -> None:
+        if token != self._playable_request_token:
+            return
+        if plex_object is not self._selected_object:
+            return
+        self._selected_playable = playable
+        self._metadata_panel.update_content(plex_object, playable)
+        if playable:
+            return
+        if error:
+            self._metadata_panel.set_status_message(f"Unable to resolve playback: {error}")
+        else:
+            self._metadata_panel.set_status_message("Nothing available to play.")
 
     def _apply_radio_options(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+import threading
 import time
 import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
@@ -199,6 +200,8 @@ class PlexService:
         self._music_alpha_items_cache: Dict[str, List[PlexObject]] = {}
         self._playlist_items_cache: Dict[str, List[PlexObject]] = {}
         self._collection_items_cache: Dict[str, List[PlexObject]] = {}
+        self._season_first_episode_cache: Dict[str, Optional[PlexObject]] = {}
+        self._season_first_episode_lock = threading.Lock()
 
     @property
     def server(self) -> Optional[PlexServer]:
@@ -285,6 +288,8 @@ class PlexService:
         self._music_alpha_items_cache.clear()
         self._playlist_items_cache.clear()
         self._collection_items_cache.clear()
+        with self._season_first_episode_lock:
+            self._season_first_episode_cache.clear()
         return server
 
     def _connect_with_strategy(
@@ -493,6 +498,11 @@ class PlexService:
             except Exception:
                 return None
 
+    @staticmethod
+    def _is_music_section(section: LibrarySection) -> bool:
+        section_type = getattr(section, "type", "") or ""
+        return section_type in {"artist", "music", "audio"}
+
     def _music_section_for(self, plex_object: Optional[PlexObject]) -> Optional[MusicSection]:
         try:
             server = self.ensure_server()
@@ -500,32 +510,53 @@ class PlexService:
             return None
         if isinstance(plex_object, MusicSection):
             return plex_object
-        if isinstance(plex_object, LibrarySection) and getattr(plex_object, "type", "") == "artist":
+        if isinstance(plex_object, LibrarySection) and self._is_music_section(plex_object):
             return cast(MusicSection, plex_object)
         section_id = getattr(plex_object, "librarySectionID", None) if plex_object else None
         section_uuid = getattr(plex_object, "librarySectionUUID", None) if plex_object else None
         try:
-            sections = list(server.library.sections())
+            sections = [
+                cast(MusicSection, section)
+                for section in server.library.sections()
+                if self._is_music_section(section)
+            ]
         except Exception:
+            return None
+        if not sections:
             return None
         if section_id is not None:
             section_id_str = str(section_id)
             for section in sections:
-                if getattr(section, "type", "") != "artist":
-                    continue
                 if str(getattr(section, "key", "")) == section_id_str or str(getattr(section, "librarySectionID", "")) == section_id_str:
-                    return cast(MusicSection, section)
+                    return section
         if section_uuid:
             section_uuid_str = str(section_uuid)
             for section in sections:
-                if getattr(section, "type", "") != "artist":
-                    continue
                 if str(getattr(section, "uuid", "")) == section_uuid_str:
-                    return cast(MusicSection, section)
-        for section in sections:
-            if getattr(section, "type", "") == "artist":
-                return cast(MusicSection, section)
+                    return section
+        if plex_object is None:
+            return sections[0]
+        obj_type = getattr(plex_object, "type", "") or ""
+        if obj_type in {"artist", "album", "track", "audio"}:
+            return sections[0]
         return None
+
+    def is_music_context(self, plex_object: Optional[PlexObject]) -> bool:
+        if not isinstance(plex_object, PlexObject):
+            return False
+        section = self._music_section_for(plex_object)
+        if section is None:
+            return False
+        if isinstance(plex_object, LibrarySection):
+            return True
+        obj_type = getattr(plex_object, "type", "") or ""
+        return obj_type in {
+            "artist",
+            "album",
+            "track",
+            "audio",
+            "radio_station",
+        }
 
     @staticmethod
     def _radio_cache_key(section: MusicSection) -> str:
@@ -1618,23 +1649,69 @@ class PlexService:
                 return None
         return related
 
+    def _season_cache_key(self, season: PlexObject) -> Optional[str]:
+        for attr in ("ratingKey", "key", "uuid"):
+            try:
+                value = getattr(season, attr, None)
+            except Exception:
+                value = None
+            if value:
+                return str(value)
+        return None
+
     def _first_episode_in_season(self, season: Optional[PlexObject]) -> Optional[PlexObject]:
         if season is None:
             return None
+        cache_key = None
         try:
-            episodes = list(season.episodes())
+            cache_key = self._season_cache_key(season)
         except Exception:
-            return None
+            cache_key = None
+        if cache_key:
+            with self._season_first_episode_lock:
+                if cache_key in self._season_first_episode_cache:
+                    return self._season_first_episode_cache[cache_key]
+
+        episodes: List[PlexObject] = []
+        key_path = getattr(season, "key", None)
+        if key_path:
+            try:
+                server = self.ensure_server()
+            except Exception:
+                server = None
+            if server:
+                path = self._augment_container_path(str(key_path), size=1, start=0)
+                try:
+                    episodes = [item for item in server.fetchItems(path) if isinstance(item, PlexObject)]
+                except Exception:
+                    episodes = []
         if not episodes:
-            return None
-        try:
-            episodes.sort(key=lambda ep: (getattr(ep, "index", 0) or 0, getattr(ep, "ratingKey", "")))
-        except Exception:
-            pass
-        for episode in episodes:
-            if getattr(episode, "ratingKey", None):
-                return episode
-        return None
+            try:
+                episodes = list(season.episodes())
+            except Exception:
+                episodes = []
+        if not episodes:
+            episode: Optional[PlexObject] = None
+        else:
+            if len(episodes) > 1:
+                try:
+                    episodes.sort(
+                        key=lambda ep: (
+                            getattr(ep, "index", 0) or 0,
+                            getattr(ep, "ratingKey", ""),
+                        )
+                    )
+                except Exception:
+                    pass
+            episode = None
+            for candidate in episodes:
+                if getattr(candidate, "ratingKey", None):
+                    episode = candidate
+                    break
+        if cache_key:
+            with self._season_first_episode_lock:
+                self._season_first_episode_cache[cache_key] = episode
+        return episode
 
     def _next_episode_in_season(self, episode: PlexObject, season: Optional[PlexObject]) -> Optional[PlexObject]:
         if season is None:

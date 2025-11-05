@@ -982,6 +982,9 @@ class PlaybackPanel(wx.Panel):
         media.add_option(":http-user-agent=Plexible/1.0")
         media.add_option(":no-video-title-show")
         media.add_option(":no-osd")
+        if self._resume_offset:
+            resume_seconds = max(0.0, self._resume_offset / 1000.0)
+            media.add_option(f":start-time={resume_seconds:.3f}")
         self._vlc_player.set_media(media)  # type: ignore[union-attr]
         self._libvlc_active_source = stream_source
         self._vlc_player.audio_set_volume(self._volume)  # type: ignore[union-attr]
@@ -1345,8 +1348,17 @@ class PlaybackPanel(wx.Panel):
             state = None
         if state not in (vlc.State.Playing, vlc.State.Paused):
             if initial:
-                wx.CallLater(300, self._maybe_seek_to_resume)
+                wx.CallLater(100, self._maybe_seek_to_resume)
             return
+        try:
+            current_time = int(self._vlc_player.get_time())
+        except Exception:
+            current_time = None
+        else:
+            if current_time is not None and current_time >= 0:
+                if abs(current_time - self._resume_offset) <= 500:
+                    self._resume_applied = True
+                    return
         try:
             self._vlc_player.set_time(self._resume_offset)
             self._resume_applied = True
