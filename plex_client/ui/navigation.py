@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 import wx
 
@@ -45,6 +45,7 @@ class NavigationTree(wx.TreeCtrl):
         self._queue_index_map: Dict[int, wx.TreeItemId] = {}
         self._queue_selected_index: int = -1
         self._queue_saved_index: int = -1
+        self._loading_nodes: Set[str] = set()
         self.Bind(wx.EVT_TREE_ITEM_EXPANDING, self._handle_expanding)
         self.Bind(wx.EVT_TREE_SEL_CHANGED, self._handle_selection)
         self.Bind(wx.EVT_WINDOW_DESTROY, self._handle_destroy)
@@ -221,21 +222,7 @@ class NavigationTree(wx.TreeCtrl):
         threading.Thread(target=work, name="PlexTreeLoader", daemon=True).start()
 
     def _apply_children(self, item: wx.TreeItemId, children: Iterable[object]) -> None:
-        if self._destroyed or not item or not item.IsOk():
-            return
-        try:
-            self.DeleteChildren(item)
-        except RuntimeError:
-            return
-        for child in children:
-            child_type = getattr(child, "type", "") or ("folder" if isinstance(child, Folder) else "item")
-            label = getattr(child, "title", None) or getattr(child, "label", None) or str(child)
-            try:
-                child_item = self.AppendItem(item, label, data=self._wrap(child_type, child))
-            except RuntimeError:
-                continue
-            if self._is_expandable(child):
-                self._add_placeholder(child_item)
+        self._replace_children(item, list(children))
 
     def _ensure_queue_root(self) -> Optional[wx.TreeItemId]:
         if self._destroyed:
@@ -392,19 +379,40 @@ class NavigationTree(wx.TreeCtrl):
             parent_obj = parent_payload.plex_object if parent_payload else None
             if not parent_obj:
                 return
-            try:
-                children = list(self._loader(parent_obj))
-            except Exception as exc:  # noqa: BLE001
-                print(f"[NavigationTree] Unable to load children during focus: {exc}")
+            loading_key = parent_payload.identifier or self._identify(parent_obj)
+            if loading_key and loading_key in self._loading_nodes:
                 return
-            self._apply_children_from_list(parent_item, children)
-            child_item = self._find_child_by_identifier(parent_item, target_id)
-            if not child_item:
-                return
-        try:
-            self.Expand(parent_item)
-        except RuntimeError:
+            if loading_key:
+                self._loading_nodes.add(loading_key)
+
+            def load_children() -> None:
+                try:
+                    children = list(self._loader(parent_obj))
+                    error: Optional[Exception] = None
+                except Exception as exc:  # noqa: BLE001
+                    children = None
+                    error = exc
+                def apply(children_list: Optional[List[object]], err: Optional[Exception]) -> None:
+                    if loading_key:
+                        self._loading_nodes.discard(loading_key)
+                    if err:
+                        print(f"[NavigationTree] Unable to load children during focus: {err}")
+                        return
+                    if children_list is None:
+                        return
+                    def done() -> None:
+                        self._focus_path_step(lineage, index, parent_item)
+                    self._replace_children(parent_item, children_list, completion=done)
+                wx.CallAfter(apply, children, error)
+
+            threading.Thread(target=load_children, name="PlexNavNodeLoader", daemon=True).start()
             return
+        should_expand = parent_item != self._root or not self.HasFlag(wx.TR_HIDE_ROOT)
+        if should_expand:
+            try:
+                self.Expand(parent_item)
+            except RuntimeError:
+                return
         if index == len(lineage) - 1:
             try:
                 self.SelectItem(child_item)
@@ -438,13 +446,41 @@ class NavigationTree(wx.TreeCtrl):
         return None
 
     def _apply_children_from_list(self, item: wx.TreeItemId, children: Iterable[object]) -> None:
+        self._replace_children(item, list(children))
+
+    def _replace_children(
+        self,
+        item: wx.TreeItemId,
+        children: List[object],
+        completion: Optional[Callable[[], None]] = None,
+    ) -> None:
+        print(f"[NavigationTree] replacing children count={len(children)} for {self.GetItemText(item) if item and item.IsOk() else '<invalid>'}")
         if self._destroyed or not item or not item.IsOk():
             return
         try:
             self.DeleteChildren(item)
         except RuntimeError:
             return
-        for child in children:
+        if not children:
+            if completion:
+                completion()
+            return
+        self._append_children_batch(item, children, 0, completion=completion)
+
+    def _append_children_batch(
+        self,
+        item: wx.TreeItemId,
+        children: List[object],
+        start: int,
+        batch_size: int = 80,
+        completion: Optional[Callable[[], None]] = None,
+    ) -> None:
+        if self._destroyed or not item or not item.IsOk():
+            return
+        end = min(len(children), start + batch_size)
+        print(f"[NavigationTree] append batch start={start} end={end} total={len(children)}")
+        for index in range(start, end):
+            child = children[index]
             child_type = getattr(child, "type", "") or ("folder" if isinstance(child, Folder) else "item")
             label = getattr(child, "title", None) or getattr(child, "label", None) or str(child)
             try:
@@ -453,4 +489,8 @@ class NavigationTree(wx.TreeCtrl):
                 continue
             if self._is_expandable(child):
                 self._add_placeholder(child_item)
+        if end < len(children):
+            wx.CallAfter(self._append_children_batch, item, children, end, batch_size, completion)
+        elif completion:
+            completion()
 

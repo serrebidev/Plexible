@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 import time
 import random
@@ -198,6 +198,7 @@ class PlexService:
         self._music_alpha_cache: Dict[str, List[MusicAlphaBucket]] = {}
         self._music_alpha_items_cache: Dict[str, List[PlexObject]] = {}
         self._playlist_items_cache: Dict[str, List[PlexObject]] = {}
+        self._collection_items_cache: Dict[str, List[PlexObject]] = {}
 
     @property
     def server(self) -> Optional[PlexServer]:
@@ -283,6 +284,7 @@ class PlexService:
         self._music_alpha_cache.clear()
         self._music_alpha_items_cache.clear()
         self._playlist_items_cache.clear()
+        self._collection_items_cache.clear()
         return server
 
     def _connect_with_strategy(
@@ -353,10 +355,13 @@ class PlexService:
             except Exception:
                 return []
         obj_type = getattr(node, "type", "")
+        print(f"[PlexService] list_children type={obj_type} for {getattr(node, 'title', node)}")
         if obj_type == "show":
             return node.seasons()
         if obj_type == "season":
             return node.episodes()
+        if obj_type == "tag":
+            return list(self.iter_tag_items(node))
         if obj_type == "episode":
             return []
         if obj_type == "artist":
@@ -366,17 +371,110 @@ class PlexService:
         if obj_type == "track":
             return []
         if obj_type == "playlist":
-            return self._playlist_items(node)
+            children = self._playlist_items(node)
+            print(f"[PlexService] playlist children count={len(children)}")
+            return children
         if obj_type in {"photo", "clip"}:
             return []
         if obj_type == "photoalbum":
             return node.photos()
         if obj_type == "collection":
-            return node.children()
+            return self._collection_items(node)
         try:
-            return node.children()
+            children = list(node.children())
+            print(f"[PlexService] default children count={len(children)}")
+            return children
         except (NotFound, AttributeError):
+            print(f"[PlexService] children not available for {obj_type}")
             return []
+
+    def iter_tag_items(
+        self,
+        tag: PlexObject,
+        *,
+        server: Optional[PlexServer] = None,
+        limit: Optional[int] = None,
+    ) -> Iterable[PlexObject]:
+        if not isinstance(tag, PlexObject):
+            return
+        target_server = server or getattr(tag, "_server", None) or self._server
+        if target_server is None:
+            try:
+                target_server = self.ensure_server()
+            except Exception:
+                return
+        yielded = 0
+        try:
+            children_iter = tag.children()  # type: ignore[attr-defined]
+        except Exception:
+            children_iter = None
+        if children_iter is not None:
+            try:
+                for child in children_iter:
+                    if not isinstance(child, PlexObject):
+                        continue
+                    yield child
+                    yielded += 1
+                    if limit is not None and yielded >= limit:
+                        return
+            except Exception:
+                pass
+        key_candidates: List[str] = []
+        for attr in ("fastKey", "key", "filter"):
+            value = getattr(tag, attr, None)
+            if isinstance(value, str) and value:
+                key_candidates.append(value)
+        for raw_path in key_candidates:
+            start = 0
+            while True:
+                remaining = None if limit is None else max(0, limit - yielded)
+                if remaining is not None and remaining <= 0:
+                    break
+                page_size = 200
+                if remaining is not None:
+                    page_size = max(1, min(page_size, remaining))
+                path = self._augment_container_path(raw_path, size=page_size, start=start)
+                try:
+                    items = list(target_server.fetchItems(path))
+                except Exception:
+                    break
+                if not items:
+                    break
+                for item in items:
+                    if not isinstance(item, PlexObject):
+                        continue
+                    yield item
+                    yielded += 1
+                    if limit is not None and yielded >= limit:
+                        return
+                if len(items) < page_size:
+                    break
+                start += len(items)
+        return
+
+    def list_tag_items(
+        self,
+        tag: PlexObject,
+        *,
+        server: Optional[PlexServer] = None,
+        limit: Optional[int] = None,
+    ) -> List[PlexObject]:
+        return list(self.iter_tag_items(tag, server=server, limit=limit))
+
+    def _augment_container_path(self, path: str, *, size: Optional[int] = None, start: int = 0) -> str:
+        if not path:
+            return path
+        split = urlsplit(path)
+        query_pairs = list(parse_qsl(split.query or "", keep_blank_values=True))
+        query: Dict[str, str] = {}
+        for key, value in query_pairs:
+            query[key] = value
+        if size is not None and "X-Plex-Container-Size" not in query:
+            query["X-Plex-Container-Size"] = str(size)
+        if "X-Plex-Container-Start" not in query:
+            query["X-Plex-Container-Start"] = str(start)
+        new_query = urlencode(query, doseq=True)
+        return urlunsplit((split.scheme, split.netloc, split.path, new_query, split.fragment))
 
     @staticmethod
     def _normalize_section_id(value: Any) -> Optional[str]:
@@ -579,6 +677,55 @@ class PlexService:
         hydrated = [self._ensure_item_loaded(item) for item in items]
         self._playlist_items_cache[cache_key] = hydrated
         return hydrated
+
+    def _collection_items(self, collection: PlexObject) -> List[PlexObject]:
+        if collection is None:
+            return []
+        rating_key = getattr(collection, "ratingKey", "") or ""
+        key = getattr(collection, "key", "") or ""
+        identifier = rating_key or key or str(id(collection))
+        cache_key = f"collection:{identifier}"
+        cached = self._collection_items_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        items: List[PlexObject] = []
+        items_attr = getattr(collection, "items", None)
+        try:
+            items = list(items_attr()) if callable(items_attr) else list(items_attr or [])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Collection] Unable to enumerate items() for '{getattr(collection, 'title', '')}': {exc}")
+            items = []
+
+        if not items:
+            children_attr = getattr(collection, "children", None)
+            try:
+                raw_children = children_attr() if callable(children_attr) else children_attr
+                items = list(raw_children or [])
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Collection] Unable to enumerate children() for '{getattr(collection, 'title', '')}': {exc}")
+                items = []
+
+        if not items:
+            server_key = key or rating_key
+            if server_key:
+                try:
+                    items = list(self.ensure_server().fetchItems(server_key))
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[Collection] Unable to load items via fetchItems for '{getattr(collection, 'title', '')}': {exc}"
+                    )
+                    items = []
+
+        hydrated = [self._ensure_item_loaded(item) for item in items if item is not None]
+        filtered = [item for item in hydrated if getattr(item, "type", None) != "collection"]
+        result = filtered or hydrated
+        self._collection_items_cache[cache_key] = result
+        return result
+
+    def collection_items(self, collection: PlexObject) -> List[PlexObject]:
+        """Expose cached collection items for UI consumers."""
+        return self._collection_items(collection)
 
     def _music_alpha_bucket_search(self, bucket: MusicAlphaBucket) -> List[PlexObject]:
         section = bucket.section
@@ -1812,7 +1959,7 @@ class PlexService:
         self,
         query: str,
         limit_per_server: int = 50,
-        on_hit: Optional[Callable[[SearchHit], None]] = None,
+        on_hit: Optional[Callable[[Iterable[SearchHit]], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ) -> List[SearchHit]:
         query = query.strip()
@@ -1832,19 +1979,34 @@ class PlexService:
             self._last_search_errors = [f"Unable to connect to the current Plex server: {exc}"]
             return hits
         current_id = self._current_resource_id
+        primary_resource: Optional[MyPlexResource] = None
+        if current_id:
+            for resource in servers:
+                if resource.clientIdentifier == current_id:
+                    primary_resource = resource
+                    break
 
-        max_workers = min(30, len(servers))
-
-        def search_resource(resource: MyPlexResource) -> tuple[List[SearchHit], List[str]]:
+        def search_resource(
+            resource: MyPlexResource,
+            *,
+            existing_server: Optional[PlexServer] = None,
+        ) -> tuple[List[SearchHit], List[str]]:
             local_hits: List[SearchHit] = []
             local_errors: List[str] = []
             name = resource.name or resource.clientIdentifier
             try:
-                msg = f"Connecting to {name}..."
-                print(f"[Search] {msg}")
-                if on_status:
-                    on_status(msg)
-                server = self._connect_with_strategy(resource, reason=f"search:{name}")
+                if existing_server is None:
+                    msg = f"Connecting to {name}..."
+                    print(f"[Search] {msg}")
+                    if on_status:
+                        on_status(msg)
+                    server = self._connect_with_strategy(resource, reason=f"search:{name}")
+                else:
+                    server = existing_server
+                    msg = f"{name}: searching current server..."
+                    print(f"[Search] {msg}")
+                    if on_status:
+                        on_status(msg)
             except Exception as exc:
                 msg = f"{name}: connect failed ({exc})"
                 print(f"[Search] {msg}")
@@ -1868,16 +2030,43 @@ class PlexService:
             for item in results:
                 hit = SearchHit(resource=resource, server=server, item=item)
                 local_hits.append(hit)
-                if on_hit:
-                    on_hit(hit)
+            if local_hits and on_hit:
+                on_hit(local_hits)
             return local_hits, local_errors
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(search_resource, resource) for resource in servers]
-            for future in as_completed(futures):
-                local_hits, local_errors = future.result()
-                hits.extend(local_hits)
-                errors.extend(local_errors)
+        remaining_resources: List[MyPlexResource] = [
+            resource for resource in servers if resource is not primary_resource
+        ]
+
+        if primary_resource is not None:
+            local_hits, local_errors = search_resource(primary_resource, existing_server=original_server)
+            hits.extend(local_hits)
+            errors.extend(local_errors)
+
+        max_workers = min(32, len(remaining_resources))
+
+        if max_workers > 0:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                pending = set()
+                resources_iter = iter(remaining_resources)
+                for _ in range(max_workers):
+                    try:
+                        resource = next(resources_iter)
+                    except StopIteration:
+                        break
+                    pending.add(executor.submit(search_resource, resource))
+
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        local_hits, local_errors = future.result()
+                        hits.extend(local_hits)
+                        errors.extend(local_errors)
+                        try:
+                            resource = next(resources_iter)
+                        except StopIteration:
+                            continue
+                        pending.add(executor.submit(search_resource, resource))
 
         self._server = original_server
         self._current_resource_id = original_resource_id
@@ -1891,5 +2080,14 @@ class PlexService:
 
     def current_resource_id(self) -> Optional[str]:
         return self._current_resource_id
+
+    def current_resource(self) -> Optional[MyPlexResource]:
+        identifier = self._current_resource_id
+        if not identifier:
+            return None
+        for resource in self.available_servers():
+            if resource.clientIdentifier == identifier:
+                return resource
+        return None
 
 

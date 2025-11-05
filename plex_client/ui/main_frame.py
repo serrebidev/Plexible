@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Dict, Iterable, List, Optional, Set, Tuple, cast
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
 
 import wx
 
@@ -37,10 +37,17 @@ class SearchResultsDialog(wx.Dialog):
         self._errors: List[str] = []
         self._finished = False
         self._closed = False
+        self._pending_hits: List[SearchHit] = []
+        self._pending_labels: List[str] = []
+        self._flush_timer: Optional[wx.CallLater] = None
+        self._flush_interval_ms = 120
+        self._last_running_status_count = 0
+        self._last_running_status_time = 0.0
 
         heading = wx.StaticText(self, label=f"Results for '{query}':")
         self._list = wx.ListBox(self)
         self._status = wx.StaticText(self, label="Searching remote Plex servers…")
+        self._status_message = self._status.GetLabel()
 
         self._open_button = wx.Button(self, wx.ID_OK, "Open")
         self._open_button.Enable(False)
@@ -68,39 +75,132 @@ class SearchResultsDialog(wx.Dialog):
     def EndModal(self, retCode: int) -> None:  # type: ignore[override]
         if self._closed:
             return
+        self._cancel_flush_timer()
+        self._flush_pending_hits()
         self._closed = True
         super().EndModal(retCode)
 
     def add_hit(self, hit: SearchHit, label: str) -> None:
+        self.add_hits([(hit, label)])
+
+    def add_hits(self, entries: Iterable[Tuple[SearchHit, str]]) -> None:
         if self._closed:
             return
-        self._hits.append(hit)
-        self._list.Append(label)
-        self._open_button.Enable(True)
-        self._status.SetLabel(f"{len(self._hits)} result(s) so far…")
+        local_hits: List[SearchHit] = []
+        local_labels: List[str] = []
+        for hit, label in entries:
+            local_hits.append(hit)
+            local_labels.append(label)
+        if not local_hits:
+            return
+        self._pending_hits.extend(local_hits)
+        self._pending_labels.extend(local_labels)
+        self._schedule_flush()
 
     def update_status(self, message: str) -> None:
+        self._set_status_label(message)
+
+    def _set_status_label(self, message: str) -> None:
         if self._closed:
             return
+        if message == self._status_message:
+            return
+        self._status_message = message
         self._status.SetLabel(message)
+
+    def _set_running_result_status(self) -> None:
+        if self._closed:
+            return
+        count = len(self._hits)
+        now = time.monotonic()
+        should_update = False
+        if self._last_running_status_count == 0 and count > 0:
+            should_update = True
+        elif count - self._last_running_status_count >= 5:
+            should_update = True
+        elif now - self._last_running_status_time >= 0.75:
+            should_update = True
+        if not should_update and count != self._last_running_status_count:
+            return
+        self._last_running_status_count = count
+        self._last_running_status_time = now
+        self._set_status_label(f"{count} result(s) so far.")
+
+    def _schedule_flush(self) -> None:
+        if self._closed:
+            return
+        if self._flush_timer is not None:
+            is_running = getattr(self._flush_timer, "IsRunning", None)
+            if callable(is_running) and is_running():
+                return
+        self._flush_timer = wx.CallLater(self._flush_interval_ms, self._flush_pending_hits)
+
+    def _cancel_flush_timer(self) -> None:
+        if self._flush_timer is None:
+            return
+        try:
+            self._flush_timer.Stop()
+        except Exception:
+            pass
+        self._flush_timer = None
+
+    def _flush_pending_hits(self) -> None:
+        timer = self._flush_timer
+        self._flush_timer = None
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        if not self._pending_hits:
+            return
+        if self._closed:
+            self._pending_hits.clear()
+            self._pending_labels.clear()
+            return
+        pending_hits = self._pending_hits
+        pending_labels = self._pending_labels
+        self._pending_hits = []
+        self._pending_labels = []
+        self._list.Freeze()
+        try:
+            append_items = getattr(self._list, "AppendItems", None)
+            if append_items:
+                append_items(pending_labels)
+            else:
+                for label in pending_labels:
+                    self._list.Append(label)
+        finally:
+            self._list.Thaw()
+        self._hits.extend(pending_hits)
+        if self._hits:
+            self._open_button.Enable(True)
+            self._set_running_result_status()
 
     def finish(self, errors: List[str]) -> None:
         if self._closed:
             return
+        self._cancel_flush_timer()
+        self._flush_pending_hits()
         self._finished = True
         self._errors = errors
         if self._hits:
-            self._status.SetLabel(f"Finished. {len(self._hits)} result(s).")
+            message = f"Finished. {len(self._hits)} result(s)."
         else:
-            self._status.SetLabel("Finished. No results found.")
+            message = "Finished. No results found."
             self._open_button.Enable(False)
+        if errors:
+            message = f"{message} {len(errors)} server issue(s)."
+        self._set_status_label(message)
 
     def finish_with_error(self, message: str) -> None:
         if self._closed:
             return
+        self._cancel_flush_timer()
+        self._flush_pending_hits()
         self._finished = True
         self._errors = [message]
-        self._status.SetLabel(f"Error: {message}")
+        self._set_status_label(f"Error: {message}")
         self._open_button.Enable(False)
 
     def _on_open(self, _: wx.CommandEvent) -> None:
@@ -143,6 +243,157 @@ class SearchResultsDialog(wx.Dialog):
     @property
     def has_hits(self) -> bool:
         return bool(self._hits)
+
+
+class CollectionItemsDialog(wx.Dialog):
+    """Non-modal window that lists the items inside a Plex collection."""
+
+    def __init__(
+        self,
+        parent: wx.Window,
+        on_play: Callable[[PlexObject], None],
+        on_focus_request: Callable[[PlexObject], None],
+        on_close: Callable[[], None],
+    ) -> None:
+        super().__init__(
+            parent,
+            title="Collection",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
+        )
+        self._on_play = on_play
+        self._on_focus_request = on_focus_request
+        self._on_close = on_close
+        self._items: List[PlexObject] = []
+
+        heading = wx.StaticText(self, label="Collection Items")
+        heading_font = heading.GetFont()
+        heading_font.SetPointSize(heading_font.GetPointSize() + 2)
+        heading_font.SetWeight(wx.FONTWEIGHT_BOLD)
+        heading.SetFont(heading_font)
+
+        self._status = wx.StaticText(self, label="Loading collection...")
+        self._status.Wrap(520)
+
+        self._list = wx.ListCtrl(
+            self,
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_NONE,
+        )
+        self._list.SetName("Collection Items")
+        self._list.InsertColumn(0, "Title", width=320)
+        self._list.InsertColumn(1, "Type", width=120)
+        self._list.InsertColumn(2, "Details", width=280)
+
+        self._focus_button = wx.Button(self, wx.ID_ANY, label="Focus in Navigation")
+        self._focus_button.Disable()
+        play_button = wx.Button(self, wx.ID_ANY, label="Play")
+        play_button.Disable()
+        close_button = wx.Button(self, wx.ID_CLOSE, label="Close")
+
+        self._focus_button.Bind(wx.EVT_BUTTON, self._handle_focus)
+        play_button.Bind(wx.EVT_BUTTON, self._handle_play_click)
+        close_button.Bind(wx.EVT_BUTTON, self._handle_close_button)
+        self._list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._handle_selection_changed)
+        self._list.Bind(wx.EVT_LIST_ITEM_DESELECTED, self._handle_selection_changed)
+        self._list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._handle_item_activated)
+        self._list.Bind(wx.EVT_CHAR_HOOK, self._handle_list_key)
+
+        button_row = wx.BoxSizer(wx.HORIZONTAL)
+        button_row.AddStretchSpacer()
+        button_row.Add(self._focus_button, 0, wx.RIGHT, 6)
+        button_row.Add(play_button, 0, wx.RIGHT, 6)
+        button_row.Add(close_button, 0)
+
+        root = wx.BoxSizer(wx.VERTICAL)
+        root.Add(heading, 0, wx.ALL, 8)
+        root.Add(self._status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        root.Add(self._list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        root.Add(button_row, 0, wx.EXPAND | wx.ALL, 8)
+        self.SetSizer(root)
+        self.SetSize((760, 520))
+
+        self.Bind(wx.EVT_CLOSE, self._handle_close_window)
+        self._play_button = play_button
+        self._update_button_state()
+
+    def set_collection_title(self, collection: PlexObject) -> None:
+        title = getattr(collection, "title", None)
+        heading = title.strip() if isinstance(title, str) else "Collection"
+        self.SetTitle(f"Collection: {heading}")
+
+    def show_loading(self, message: str) -> None:
+        self._status.SetLabel(message)
+        self._list.DeleteAllItems()
+        self._items.clear()
+        self._update_button_state()
+
+    def show_error(self, message: str) -> None:
+        self._status.SetLabel(message)
+        self._list.DeleteAllItems()
+        self._items.clear()
+        self._update_button_state()
+
+    def show_items(
+        self,
+        items: Sequence[PlexObject],
+        formatter: Callable[[PlexObject], tuple[str, str, str]],
+    ) -> None:
+        self._items = list(items)
+        self._list.DeleteAllItems()
+        for index, item in enumerate(self._items):
+            title, item_type, details = formatter(item)
+            row_index = self._list.InsertItem(index, title)
+            self._list.SetItem(row_index, 1, item_type)
+            self._list.SetItem(row_index, 2, details)
+        count = len(self._items)
+        summary = f"{count} item{'s' if count != 1 else ''}."
+        self._status.SetLabel(summary)
+        if self._items:
+            self._list.SetItemState(0, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
+            self._list.Focus(0)
+        self._update_button_state()
+
+    def _handle_selection_changed(self, _: wx.ListEvent) -> None:
+        self._update_button_state()
+
+    def _handle_item_activated(self, event: wx.ListEvent) -> None:
+        item = self._item_for_index(event.GetIndex())
+        if item:
+            self._on_play(item)
+
+    def _handle_list_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            item = self._item_for_index(self._list.GetFirstSelected())
+            if item:
+                self._on_play(item)
+                return
+        event.Skip()
+
+    def _handle_play_click(self, _: wx.CommandEvent) -> None:
+        item = self._item_for_index(self._list.GetFirstSelected())
+        if item:
+            self._on_play(item)
+
+    def _handle_focus(self, _: wx.CommandEvent) -> None:
+        item = self._item_for_index(self._list.GetFirstSelected())
+        if item:
+            self._on_focus_request(item)
+
+    def _handle_close_button(self, _: wx.CommandEvent) -> None:
+        self.Close()
+
+    def _handle_close_window(self, event: wx.CloseEvent) -> None:
+        self._on_close()
+        event.Skip()
+
+    def _item_for_index(self, index: int) -> Optional[PlexObject]:
+        if index < 0 or index >= len(self._items):
+            return None
+        return self._items[index]
+
+    def _update_button_state(self) -> None:
+        has_selection = self._list.GetSelectedItemCount() > 0
+        self._focus_button.Enable(has_selection)
+        self._play_button.Enable(has_selection)
 
 
 class RadioChooserDialog(wx.Dialog):
@@ -285,6 +536,9 @@ class MainFrame(wx.Frame):
         self._radio_request_token: int = 0
         self._radio_sessions: Dict[str, RadioSession] = {}
         self._radio_pending_sessions: Dict[str, Tuple[RadioSession, int]] = {}
+        self._collection_request_token: int = 0
+        self._collection_dialog: Optional[CollectionItemsDialog] = None
+        self._collection_dialog_identifier: Optional[str] = None
         self._active_queue_session: Optional[RadioSession] = None
         self._queue_last_focus_index: int = -1
         self._reset_autoplay_state()
@@ -506,6 +760,8 @@ class MainFrame(wx.Frame):
         self._radio_options = []
         self._radio_pending_sessions.clear()
         self._radio_loading = False
+        self._collection_request_token += 1
+        collection_token = self._collection_request_token
         if isinstance(plex_object, PlexObject):
             queue_index = self._queue_index_for_object(plex_object)
             if queue_index is not None:
@@ -518,6 +774,18 @@ class MainFrame(wx.Frame):
         if isinstance(plex_object, PlexObject) and getattr(plex_object, "type", "") == "playlist":
             playlist_candidate = plex_object
         self._selected_playlist = playlist_candidate
+        collection_candidate: Optional[PlexObject] = None
+        collection_identifier: Optional[str] = None
+        if isinstance(plex_object, PlexObject) and getattr(plex_object, "type", "") == "collection":
+            collection_candidate = plex_object
+            collection_identifier = self._navigation_identifier(collection_candidate)
+        else:
+            if hasattr(self, "_dismiss_collection_dialog"):
+                self._dismiss_collection_dialog()
+            else:
+                # failsafe for older builds where the dialog helpers might not exist yet
+                self._collection_dialog = None
+                self._collection_dialog_identifier = None
         if isinstance(plex_object, MusicCategory):
             self._metadata_panel.update_content(plex_object, None)
             self._metadata_panel.set_radio_state(visible=False)
@@ -562,10 +830,20 @@ class MainFrame(wx.Frame):
                     playable = None
         self._selected_playable = playable
         self._metadata_panel.update_content(plex_object, playable)
-        if playlist_candidate is None and plex_object is not None:
+        should_load_radio = (
+            playlist_candidate is None
+            and isinstance(plex_object, PlexObject)
+            and getattr(plex_object, "type", "") not in {"collection"}
+        )
+        if should_load_radio:
             self._load_radio_options_async(plex_object)
         else:
             self._metadata_panel.set_radio_state(visible=False)
+        if collection_candidate is not None and collection_identifier:
+            dialog = self._ensure_collection_dialog(collection_candidate, collection_identifier)
+            dialog.show_loading("Loading collection items...")
+            self._metadata_panel.set_status_message("Collection items appear in the collection window.")
+            self._load_collection_items_async(collection_candidate, collection_token, collection_identifier)
 
     @staticmethod
     def _radio_option_from_station(station: MusicRadioStation) -> RadioOption:
@@ -645,6 +923,194 @@ class MainFrame(wx.Frame):
             )
         else:
             self._metadata_panel.set_radio_state(visible=False)
+
+    def _load_collection_items_async(self, collection: PlexObject, token: int, identifier: str) -> None:
+        if not self._service:
+            dialog = self._collection_dialog
+            if dialog and identifier == self._collection_dialog_identifier:
+                dialog.show_error("Sign in to view this collection.")
+            self._metadata_panel.set_status_message("Sign in to view this collection.")
+            return
+
+        def worker(target: PlexObject, request_token: int, target_id: str) -> None:
+            try:
+                items = self._service.collection_items(target)
+                error: Optional[str] = None
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Collection] Unable to enumerate items for '{getattr(target, 'title', target)}': {exc}")
+                items = []
+                error = str(exc)
+            wx.CallAfter(self._apply_collection_items, request_token, target_id, target, items, error)
+
+        threading.Thread(
+            target=worker,
+            args=(collection, token, identifier),
+            name="PlexCollectionItems",
+            daemon=True,
+        ).start()
+
+    def _apply_collection_items(
+        self,
+        token: int,
+        identifier: str,
+        collection: PlexObject,
+        items: List[PlexObject],
+        error: Optional[str],
+    ) -> None:
+        if token != self._collection_request_token:
+            return
+        if identifier != self._collection_dialog_identifier:
+            return
+        dialog = self._collection_dialog
+        if not dialog:
+            return
+        dialog.set_collection_title(collection)
+        title = getattr(collection, "title", "collection")
+        if error:
+            message = f"Unable to load '{title}': {error}"
+            dialog.show_error(message)
+            self._metadata_panel.set_status_message(message)
+            return
+        if not items:
+            message = "This collection does not contain any items."
+            dialog.show_error(message)
+            self._metadata_panel.set_status_message(message)
+            return
+        dialog.show_items(items, self._collection_item_fields)
+        summary = f"{len(items)} item{'s' if len(items) != 1 else ''} loaded in the collection window."
+        self._metadata_panel.set_status_message(summary)
+
+    def _collection_item_fields(self, item: PlexObject) -> tuple[str, str, str]:
+        media_type = getattr(item, "type", "") or ""
+        title = getattr(item, "title", None)
+        if not isinstance(title, str) or not title.strip():
+            title = getattr(item, "name", None)
+        if not isinstance(title, str) or not title.strip():
+            title = str(item)
+        clean_title = title.strip()
+
+        type_label = media_type.replace("_", " ").title() if media_type else "Item"
+        details_parts: List[str] = []
+
+        if media_type == "episode":
+            show = getattr(item, "grandparentTitle", None) or getattr(item, "show", None)
+            season_raw = getattr(item, "parentIndex", None)
+            episode_raw = getattr(item, "index", None)
+            if isinstance(show, str) and show.strip():
+                details_parts.append(show.strip())
+            try:
+                season_num = int(season_raw) if season_raw is not None else None
+            except (TypeError, ValueError):
+                season_num = None
+            try:
+                episode_num = int(episode_raw) if episode_raw is not None else None
+            except (TypeError, ValueError):
+                episode_num = None
+            if season_num is not None and episode_num is not None:
+                details_parts.append(f"S{season_num:02d}E{episode_num:02d}")
+            elif episode_num is not None:
+                details_parts.append(f"E{episode_num}")
+        elif media_type == "movie":
+            year = getattr(item, "year", None)
+            try:
+                year_int = int(year) if year else None
+            except (TypeError, ValueError):
+                year_int = None
+            if year_int:
+                details_parts.append(str(year_int))
+        elif media_type == "season":
+            series = getattr(item, "parentTitle", None) or getattr(item, "show", None)
+            if isinstance(series, str) and series.strip():
+                details_parts.append(series.strip())
+            index_raw = getattr(item, "index", None)
+            if isinstance(index_raw, int):
+                details_parts.append(f"Season {index_raw}")
+        elif media_type == "artist":
+            genre = getattr(item, "genre", None)
+            if isinstance(genre, str) and genre.strip():
+                details_parts.append(genre.strip())
+        elif media_type == "album":
+            artist = getattr(item, "parentTitle", None) or getattr(item, "grandparentTitle", None)
+            if isinstance(artist, str) and artist.strip():
+                details_parts.append(artist.strip())
+        elif media_type == "track":
+            album = getattr(item, "parentTitle", None)
+            artist = getattr(item, "grandparentTitle", None) or getattr(item, "parentTitle", None)
+            if isinstance(album, str) and album.strip():
+                details_parts.append(album.strip())
+            if isinstance(artist, str) and artist.strip():
+                details_parts.append(artist.strip())
+        elif media_type == "collection":
+            section = getattr(item, "librarySectionTitle", None)
+            if isinstance(section, str) and section.strip():
+                details_parts.append(section.strip())
+
+        summary = getattr(item, "summary", None)
+        if (not details_parts) and isinstance(summary, str) and summary.strip():
+            trimmed = summary.strip()
+            details_parts.append(trimmed if len(trimmed) <= 120 else f"{trimmed[:117]}...")
+
+        details = " - ".join(details_parts)
+        return clean_title, type_label or "Item", details
+
+    def _ensure_collection_dialog(self, collection: PlexObject, identifier: str) -> CollectionItemsDialog:
+        dialog = self._collection_dialog
+        if dialog is None or not dialog:
+            dialog = CollectionItemsDialog(
+                self,
+                on_play=self._play_collection_item,
+                on_focus_request=self._focus_navigation_on_item,
+                on_close=self._on_collection_dialog_closed,
+            )
+            self._collection_dialog = dialog
+        self._collection_dialog_identifier = identifier
+        dialog.set_collection_title(collection)
+        if not dialog.IsShown():
+            dialog.Show()
+        try:
+            dialog.Raise()
+        except Exception:
+            pass
+        return dialog
+
+    def _dismiss_collection_dialog(self) -> None:
+        dialog = self._collection_dialog
+        if not dialog:
+            return
+        self._collection_dialog = None
+        self._collection_dialog_identifier = None
+        try:
+            dialog.Destroy()
+        except Exception:
+            try:
+                dialog.Hide()
+            except Exception:
+                pass
+
+    def _on_collection_dialog_closed(self) -> None:
+        self._collection_dialog = None
+        self._collection_dialog_identifier = None
+
+    def _play_collection_item(self, item: PlexObject) -> None:
+        if not self._service:
+            wx.Bell()
+            return
+        try:
+            playable = self._service.resolve_playable(item)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Collection] Unable to resolve playable item: {exc}")
+            playable = None
+        if not playable:
+            wx.Bell()
+            self._metadata_panel.set_status_message("Unable to play the selected collection item.")
+            return
+        self._selected_object = item
+        self._selected_playable = playable
+        self._metadata_panel.update_content(item, playable)
+        self._metadata_panel.set_radio_state(visible=False)
+        self._focus_navigation_on_item(item)
+        self._start_playback(playable)
+
 
     def _handle_radio_action(self) -> None:
         if self._radio_loading:
@@ -1093,9 +1559,13 @@ class MainFrame(wx.Frame):
 
         results_dialog = SearchResultsDialog(self, query)
 
-        def on_hit(hit: SearchHit) -> None:
-            label = self._format_search_result(hit)
-            results_dialog.add_hit(hit, label)
+        def on_hit(received: Iterable[SearchHit]) -> None:
+            entries: List[Tuple[SearchHit, str]] = []
+            for hit in received:
+                label = self._format_search_result(hit)
+                entries.append((hit, label))
+            if entries:
+                results_dialog.add_hits(entries)
 
         def on_status(message: str) -> None:
             results_dialog.update_status(message)
@@ -1105,7 +1575,7 @@ class MainFrame(wx.Frame):
                 self._service.search_all_servers(
                     query,
                     limit_per_server=50,
-                    on_hit=lambda hit: wx.CallAfter(on_hit, hit),
+                    on_hit=lambda hits: wx.CallAfter(on_hit, list(hits)),
                     on_status=lambda msg: wx.CallAfter(on_status, msg),
                 )  # type: ignore[union-attr]
                 errors = self._service.last_search_errors() if self._service else []
@@ -1122,12 +1592,7 @@ class MainFrame(wx.Frame):
         if result == wx.ID_OK and selected_hit:
             self._handle_search_hit(selected_hit)
         elif errors:
-            wx.MessageBox(
-                "Some servers could not be searched:\n- " + "\n- ".join(errors),
-                "Plexible",
-                wx.ICON_WARNING | wx.OK,
-                parent=self,
-            )
+            self._set_status(f"Search finished with {len(errors)} server issue(s).")
         elif not results_dialog.has_hits:
             self._set_status(f"No results for '{query}'.")
         else:
@@ -1140,8 +1605,7 @@ class MainFrame(wx.Frame):
         if current_id and hit.resource.clientIdentifier != current_id:
             self._connect_to_server(hit.resource, None, post_selection=hit)
             return
-        self._display_search_result(hit.item)
-        self._set_status(f"Showing result '{getattr(hit.item, 'title', str(hit.item))}'.")
+        self._open_search_hit(hit)
 
     def _handle_change_server(self, _: wx.CommandEvent) -> None:
         if not self._service:
@@ -1291,27 +1755,134 @@ class MainFrame(wx.Frame):
                 return str(value)
         return str(id(obj))
 
+    def _tag_title_and_category(self, tag_obj: PlexObject) -> tuple[str, Optional[str]]:
+        raw = getattr(tag_obj, "title", None)
+        if not isinstance(raw, str) or not raw.strip():
+            raw = getattr(tag_obj, "tag", None)
+        if not isinstance(raw, str) or not raw.strip():
+            raw = str(tag_obj)
+        trimmed = raw.strip()
+        if trimmed.startswith("<") and trimmed.endswith(">"):
+            inner = trimmed[1:-1]
+            parts = [segment for segment in inner.split(":") if segment]
+            if len(parts) >= 2:
+                category = parts[0]
+                name = parts[-1]
+                friendly_name = name.replace("-", " ").strip() or name
+                friendly_category = category.replace("-", " ").strip()
+                category_label = friendly_category.title() if friendly_category else None
+                return friendly_name, category_label
+        humanized = trimmed.replace("-", " ").strip()
+        return humanized or raw, None
+
     def _format_search_result(self, hit: SearchHit) -> str:
         item = hit.item
-        title = getattr(item, "title", str(item))
+        raw_title = getattr(item, "title", str(item))
         media_type = getattr(item, "type", "")
-        extras = []
+        if media_type == "tag":
+            title, tag_category = self._tag_title_and_category(item)
+        else:
+            title = raw_title.replace("-", " ").strip() if isinstance(raw_title, str) else raw_title
+            if isinstance(title, str) and not title:
+                title = raw_title
+            tag_category = None
+
+        extras: List[str] = []
         for attr in ("grandparentTitle", "parentTitle", "artist", "show"):
             value = getattr(item, attr, None)
             if isinstance(value, str) and value:
                 extras.append(value)
+        if tag_category:
+            extras.append(tag_category)
         section_title = getattr(item, "librarySectionTitle", "")
         server_label = self._format_server_label(hit.resource, None)
-        parts = [title]
+        parts = [str(title)]
         if media_type:
             parts.append(f"[{media_type}]")
         if extras:
-            parts.append(f"({' • '.join(extras)})")
+            parts.append(f"({' / '.join(extras)})")
         if section_title:
             parts.append(f"- {section_title}")
         if server_label:
             parts.append(f"@ {server_label}")
         return " ".join(part for part in parts if part)
+
+    def _open_search_hit(self, hit: SearchHit) -> None:
+        item = hit.item
+        item_type = getattr(item, "type", "")
+        if item_type == "tag":
+            self._show_tag_dialog(hit, item)
+            return
+        self._display_search_result(item)
+        self._set_status(f"Showing result '{getattr(item, 'title', str(item))}'.")
+
+    def _show_tag_dialog(self, hit: Optional[SearchHit], tag: PlexObject) -> None:
+        if not self._service:
+            return
+        resource = hit.resource if hit else self._service.current_resource()  # type: ignore[union-attr]
+        try:
+            server = hit.server if hit else self._service.ensure_server()
+        except Exception as exc:  # noqa: BLE001
+            wx.MessageBox(
+                f"Unable to connect to the Plex server for this tag:\n{exc}",
+                "Plexible",
+                wx.ICON_ERROR | wx.OK,
+                parent=self,
+            )
+            return
+        if resource is None or server is None:
+            wx.MessageBox(
+                "Tag items are unavailable because no Plex server is connected.",
+                "Plexible",
+                wx.ICON_WARNING | wx.OK,
+                parent=self,
+            )
+            return
+        title, category = self._tag_title_and_category(tag)
+        heading = title if not category else f"{title} ({category})"
+        self._metadata_panel.update_content(tag, None)
+        self._metadata_panel.set_radio_state(visible=False)
+        self._set_status(f"Loading tag '{heading}'…")
+        dialog = SearchResultsDialog(self, f"Tag: {heading}")
+        dialog.update_status("Loading tag items…")
+
+        def worker() -> None:
+            batch: List[Tuple[SearchHit, str]] = []
+            count = 0
+            try:
+                for child in self._service.iter_tag_items(tag, server=server, limit=None):  # type: ignore[union-attr]
+                    sub_hit = SearchHit(resource=resource, server=server, item=child)
+                    label = self._format_search_result(sub_hit)
+                    batch.append((sub_hit, label))
+                    count += 1
+                    if len(batch) >= 25:
+                        wx.CallAfter(dialog.add_hits, list(batch))
+                        batch.clear()
+                if batch:
+                    wx.CallAfter(dialog.add_hits, list(batch))
+                wx.CallAfter(dialog.finish, [])
+                wx.CallAfter(
+                    dialog.update_status,
+                    f"Loaded {count} item(s) for tag '{heading}'.",
+                )
+            except Exception as exc:  # noqa: BLE001
+                wx.CallAfter(dialog.finish_with_error, f"Unable to load tag items: {exc}")
+
+        threading.Thread(target=worker, name="PlexTagLoader", daemon=True).start()
+        result = dialog.ShowModal()
+        selected_hit = dialog.selected_hit
+        errors = dialog.errors
+        has_hits = dialog.has_hits
+        dialog.Destroy()
+        if result == wx.ID_OK and selected_hit:
+            self._handle_search_hit(selected_hit)
+            return
+        if errors:
+            self._set_status(f"Tag '{heading}' finished with {len(errors)} issue(s).")
+        elif not has_hits:
+            self._set_status(f"No videos found for tag '{heading}'.")
+        else:
+            self._set_status(f"Tag browsing cancelled for '{heading}'.")
 
     def _handle_server_change_error(self, exc: Exception) -> None:
         self._clear_busy()
@@ -1382,8 +1953,8 @@ class MainFrame(wx.Frame):
             except Exception:
                 refreshed = hit.item
             try:
-                self._display_search_result(refreshed)
-                self._set_status(f"Showing result '{getattr(refreshed, 'title', str(refreshed))}'.")
+                refreshed_hit = SearchHit(resource=hit.resource, server=server, item=refreshed)
+                self._open_search_hit(refreshed_hit)
             except Exception as exc:  # noqa: BLE001
                 wx.MessageBox(
                     f"Unable to load the selected item after switching servers:\n{exc}",
