@@ -17,6 +17,7 @@ https://github.com/pushingkarmaorg/python-plexapi
 - Arrow keys move focus; Enter or Numpad Enter always plays the focused node.
 - Shows and seasons auto-resolve to the first playable episode before playback starts.
 - Every selection refreshes metadata/status with `wx.CallAfter` so screen readers get the change immediately.
+- Collections open a non-modal “Collection Items” list that auto-loads members, supports Enter/Play, and offers a “Focus in Navigation” button so the tree snaps to the highlighted item; leaving the collection closes the window so we never strand assistive tech.
 
 ## Playback Facts
 - LibVLC is the renderer; if the direct URL fails we fall back to the Plex HLS stream, then the configured external player, without losing resume offsets.
@@ -42,8 +43,9 @@ https://github.com/pushingkarmaorg/python-plexapi
 - When Plex API calls fail, surface the raw error (toast/dialog), log it, and keep the UI responsive.
 
 ## Hot Files
-- `main.py` � wxPython bootstrapper.
-- `plex_client/plex_service.py` � Plex auth, discovery, timeline/progress calls plus server confirmation loop.
-- `plex_client/ui/main_frame.py` � navigation, queues, shutdown flushing, progress scheduling.
-- `plex_client/ui/playback.py` � LibVLC orchestration, resume seek, timeline polling.
+- `main.py` ? wxPython bootstrapper.
+- `plex_client/plex_service.py` ? Plex auth, discovery, timeline/progress calls plus server confirmation loop.
+- `plex_client/ui/main_frame.py` ? navigation, queues, shutdown flushing, progress scheduling, and the Collection Items dialog lifecycle.
+- `plex_client/ui/playback.py` ? LibVLC orchestration, resume seek, timeline polling.
+- `PlexService.collection_items` caches per-session collection contents and clears on server switches so repeat openings stay fast.
 
