@@ -1,5 +1,5 @@
 # Agents Playbook
-You are a 10X python expert, and a plex expert!
+You are a  python expert, and you have a decade of plex server expertese.
 This client is made from
 The plex API,
 https://developer.plex.tv/

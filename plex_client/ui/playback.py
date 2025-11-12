@@ -1356,7 +1356,8 @@ class PlaybackPanel(wx.Panel):
             current_time = None
         else:
             if current_time is not None and current_time >= 0:
-                if abs(current_time - self._resume_offset) <= 500:
+                tolerance = 500
+                if current_time + tolerance >= self._resume_offset:
                     self._resume_applied = True
                     return
         try:
