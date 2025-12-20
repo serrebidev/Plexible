@@ -9,10 +9,16 @@ block_cipher = None
 hidden_imports = collect_submodules('plexapi')
 hidden_imports += collect_submodules('plex_client')
 hidden_imports += collect_submodules('wx')
+hidden_imports += collect_submodules('requests')
+hidden_imports += collect_submodules('urllib3')
+hidden_imports += collect_submodules('vlc')
 hidden_imports += [
     'vlc',
     'requests',
     'urllib3',
+    'certifi',
+    'idna',
+    'charset_normalizer',
     'json',
     'uuid',
     'webbrowser',

@@ -12,6 +12,7 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 ### VLC Integration & Playback
 - **LibVLC Bootstrapping**: `plex_client/ui/playback.py` handles a complex VLC environment setup. It looks for local VLC installations or **automatically downloads a portable VLC version** (3.0.20) to `LOCALAPPDATA/Plexible/vlc` if no system VLC is found.
 - **Playback Modes**: Primarily uses `libvlc` for integrated playback within the UI. It handles both HLS and Direct streams.
+- **Fallback Sources**: LibVLC startup tries multiple candidate stream URLs (direct then fallback/HLS) before giving up.
 
 ### Configuration & Persistence
 - **ConfigStore**: Managed in `plex_client/config.py`. It resolves the config path based on environment variables or the script location, defaulting to the project root or AppData for legacy migrations.
@@ -19,9 +20,9 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 
 ### Build System (PyInstaller)
 - **Spec File**: `plexible.spec` is the source of truth for builds.
-- **Submodule Collection**: It is critical to use `collect_submodules` for both `plexapi` and `plex_client`.
+- **Submodule Collection**: Use `collect_submodules` for `plexapi`, `plex_client`, `wx`, `requests`, `urllib3`, and `vlc`.
 - **wxPython Issues**: Collecting all submodules for `wx` ensures UI stability but may trigger deprecation warnings (e.g., `wx.lib.pubsub`). These are expected and don't halt the build.
-- **Hidden Imports**: Standard libraries like `concurrent.futures`, `urllib3`, and `ctypes` should be explicitly listed to ensure they are available in the one-file bundle.
+- **Hidden Imports**: Standard libraries like `concurrent.futures`, `urllib3`, and `ctypes`, plus `requests` dependencies (`certifi`, `idna`, `charset_normalizer`) should be explicitly listed to ensure they are available in the one-file bundle.
 
 ## Instructions for Future Agents
 - **Testing**: When adding features, test within the frozen environment context (check `sys.frozen`) as path resolution for `config.json` and assets changes.

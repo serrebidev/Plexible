@@ -921,29 +921,26 @@ class PlaybackPanel(wx.Panel):
             return "none"
 
         self._libvlc_reset_candidates()
-        stream_source = self._libvlc_next_source()
-        if not stream_source:
-            if force_message:
-                wx.MessageBox(
-                    "LibVLC could not find a playable stream for this item.",
-                    "Plexible",
-                    wx.ICON_WARNING | wx.OK,
-                    parent=self,
-                )
-            return "none"
-
-        if self._start_libvlc(stream_source):
-            return "libvlc"
-
-        if force_message:
-            wx.MessageBox(
-                "LibVLC was unable to start playback for this item.",
-                "Plexible",
-                wx.ICON_WARNING | wx.OK,
-                parent=self,
-            )
-        return "none"
-        return "none"
+        attempted = False
+        while True:
+            stream_source = self._libvlc_next_source()
+            if not stream_source:
+                if force_message:
+                    message = (
+                        "LibVLC was unable to start playback for this item."
+                        if attempted
+                        else "LibVLC could not find a playable stream for this item."
+                    )
+                    wx.MessageBox(
+                        message,
+                        "Plexible",
+                        wx.ICON_WARNING | wx.OK,
+                        parent=self,
+                    )
+                return "none"
+            attempted = True
+            if self._start_libvlc(stream_source):
+                return "libvlc"
 
     def _libvlc_reset_candidates(self) -> None:
         self._clear_libvlc_candidates()
