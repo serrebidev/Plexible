@@ -1,3 +1,4 @@
 wxPython>=4.2
 plexapi @ git+https://github.com/pushingkarmaorg/python-plexapi
 python-vlc
+requests
