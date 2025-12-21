@@ -33,7 +33,6 @@ hidden_imports += [
 ]
 
 added_files = [
-    ('config.json', '.'),
     ('requirements.txt', '.'),
     ('agents.md', '.'),
 ]

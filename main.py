@@ -43,6 +43,9 @@ BOOTSTRAP_FLAG = "PLEX_CLIENT_BOOTSTRAPPED"
 
 def ensure_requirements_installed() -> None:
     """Install required third-party packages if they are not available."""
+    if getattr(sys, "frozen", False):
+        return
+
     requirements_path = Path(__file__).with_name("requirements.txt")
     missing, reinstall = _evaluate_runtime_requirements()
 
