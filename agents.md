@@ -20,9 +20,10 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 
 ### Build System (PyInstaller)
 - **Spec File**: `plexible.spec` is the source of truth for builds.
+- **Distribution Mode**: Switched from `--onefile` to directory-based builds (`--onedir`) to resolve execution issues on some user systems.
 - **Submodule Collection**: Use `collect_submodules` for `plexapi`, `plex_client`, `wx`, `requests`, `urllib3`, and `vlc`.
 - **wxPython Issues**: Collecting all submodules for `wx` ensures UI stability but may trigger deprecation warnings (e.g., `wx.lib.pubsub`). These are expected and don't halt the build.
-- **Hidden Imports**: Standard libraries like `concurrent.futures`, `urllib3`, and `ctypes`, plus `requests` dependencies (`certifi`, `idna`, `charset_normalizer`) should be explicitly listed to ensure they are available in the one-file bundle.
+- **Hidden Imports**: Standard libraries like `concurrent.futures`, `urllib3`, and `ctypes`, plus `requests` dependencies (`certifi`, `idna`, `charset_normalizer`) should be explicitly listed to ensure they are available in the frozen bundle.
 
 ## Instructions for Future Agents
 - **Testing**: When adding features, test within the frozen environment context (check `sys.frozen`) as path resolution for `config.json` and assets changes.

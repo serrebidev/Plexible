@@ -39,16 +39,19 @@ Plexible is a desktop Plex client built with wxPython and the latest [`python-pl
 - For MPC-HC/BE fallback, install MPC-HC (or MPC-BE) and optionally set `MPC_PATH` to the player executable.
 - Signing out clears the cached token. If your token expires, simply sign out and sign back in.
 
-## Build A Standalone App (Windows or Linux)
+### Building
+To build a standalone executable (directory-based for better compatibility):
 
-If you want a single executable you can copy around:
+**Using the build script:**
+```batch
+build_exe.bat
+```
 
-1) From the project folder, install the bundler and build:
-
-   - `pip install pyinstaller`
-   - `pyinstaller --noconsole --onefile main.py`
-
-2) Your executable will be in the `./dist` folder when the build finishes.
+**Using PyInstaller directly:**
+```bash
+pyinstaller plexible.spec
+```
+The output will be in the `dist/Plexible` folder. Run `Plexible.exe` from that directory.
 
 ## License
 
