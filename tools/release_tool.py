@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 
-SEMVER_TAG_RE = re.compile(r"^v(\\d+)\\.(\\d+)(?:\\.(\\d+))?$")
-VERSION_RE = re.compile(r"APP_VERSION\\s*=\\s*\"([^\"]+)\"")
+SEMVER_TAG_RE = re.compile(r"^v(\d+)\.(\d+)(?:\.(\d+))?$")
+VERSION_RE = re.compile(r'APP_VERSION\s*=\s*"([^"]+)"')
 MIN_VERSION = (1, 38, 0)
 
 

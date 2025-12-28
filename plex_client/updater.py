@@ -25,7 +25,7 @@ GITHUB_REPO = "Plexible"
 APP_EXE_NAME = "Plexible.exe"
 UPDATE_MANIFEST_NAME = "Plexible-update.json"
 
-_VERSION_RE = re.compile(r"^v?(\\d+)\\.(\\d+)(?:\\.(\\d+))?$")
+_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 
 
 class UpdateError(RuntimeError):
