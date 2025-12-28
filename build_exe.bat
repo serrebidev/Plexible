@@ -150,7 +150,12 @@ if "%DRY_RUN%"=="1" (
     echo [dry-run] Compute SHA-256 and manifest for "%ZIP_PATH%"
 ) else (
     set "ZIP_SHA="
-    for /f "usebackq delims=" %%A in (`python -c "import hashlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); h.update(f.read()); f.close(); print(h.hexdigest())"`) do set "ZIP_SHA=%%A"
+    set "ZIP_HASH_FILE=%ARTIFACTS_DIR%\\zip_hash.txt"
+    del /f /q "%ZIP_HASH_FILE%" >nul 2>&1
+    python -c "import hashlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); h.update(f.read()); f.close(); print(h.hexdigest())" > "%ZIP_HASH_FILE%" 2>nul
+    if exist "%ZIP_HASH_FILE%" (
+        for /f "usebackq delims=" %%A in ("%ZIP_HASH_FILE%") do set "ZIP_SHA=%%A"
+    )
     if "%ZIP_SHA%"=="" (
         for /f "usebackq tokens=1 delims= " %%A in (`certutil -hashfile "%ZIP_PATH%" SHA256 ^| findstr /r /v "hash of file" ^| findstr /r /v "CertUtil"`) do (
             if not defined ZIP_SHA set "ZIP_SHA=%%A"
