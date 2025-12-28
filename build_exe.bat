@@ -142,8 +142,8 @@ if "%DRY_RUN%"=="1" (
 if "%DRY_RUN%"=="1" (
     echo [dry-run] Compute SHA-256 and manifest for "%ZIP_PATH%"
 ) else (
-    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 '%ZIP_PATH%').Hash"`) do set "ZIP_SHA=%%A"
-    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Date).ToString('o')"`) do set "PUBLISHED_AT=%%A"
+    for /f "usebackq delims=" %%A in (`python -c "import hashlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); [h.update(chunk) for chunk in iter(lambda: f.read(1024*1024), b'')]; f.close(); print(h.hexdigest())"`) do set "ZIP_SHA=%%A"
+    for /f "usebackq delims=" %%A in (`python -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())"`) do set "PUBLISHED_AT=%%A"
     python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
 )
 
