@@ -96,6 +96,7 @@ class ConfigStore:
             "preferred_servers": [],
             "vlc_path": None,
             "pending_progress": {},
+            "auto_check_updates": True,
         }
 
     def _load_from_disk(self) -> Dict[str, Any]:
@@ -207,6 +208,13 @@ class ConfigStore:
         if isinstance(stored, dict):
             return {str(k): dict(v) for k, v in stored.items() if isinstance(v, dict)}
         return {}
+
+    def get_auto_check_updates(self) -> bool:
+        stored = self.get("auto_check_updates", True)
+        return bool(stored)
+
+    def set_auto_check_updates(self, enabled: bool) -> None:
+        self.set("auto_check_updates", bool(enabled))
 
     def get_pending_entry(self, rating_key: str) -> Dict[str, int]:
         progress = self.get_pending_progress()

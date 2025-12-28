@@ -35,6 +35,7 @@ hidden_imports += [
 added_files = [
     ('requirements.txt', '.'),
     ('agents.md', '.'),
+    ('plex_client/update_helper.bat', '.'),
 ]
 
 a = Analysis(

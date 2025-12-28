@@ -44,7 +44,7 @@ To build a standalone executable (directory-based for better compatibility):
 
 **Using the build script:**
 ```batch
-build_exe.bat
+build_exe.bat build
 ```
 
 **Using PyInstaller directly:**
@@ -52,6 +52,51 @@ build_exe.bat
 pyinstaller plexible.spec
 ```
 The output will be in the `dist/Plexible` folder. Run `Plexible.exe` from that directory.
+
+### Releases
+The build script now supports automated releases and update metadata generation.
+
+**Prerequisites**
+- Git and GitHub CLI (`gh`) installed and authenticated (`gh auth login`).
+- Windows SDK signtool available (defaults to `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe`).
+- Code signing certificate installed and accessible by signtool.
+- Optional: set `SIGNTOOL_PATH` to override the default signtool location.
+
+**Commands**
+```batch
+build_exe.bat release
+```
+Runs end-to-end: computes the next version, updates `plex_client/version.py`, builds via `plexible.spec`, signs `Plexible.exe`, zips the `dist\Plexible` folder, generates `Plexible-update.json`, commits the version bump, tags, pushes, and creates a GitHub release with the zip + manifest attached.
+
+```batch
+build_exe.bat build
+```
+Builds, signs, zips, and generates update metadata locally (no git tag or GitHub release).
+
+```batch
+build_exe.bat dry-run
+```
+Prints the actions without modifying git or creating releases.
+
+```batch
+build_exe.bat
+```
+Legacy behavior (clean + build only).
+
+### Updater
+Plexible checks GitHub Releases for the latest tag and reads `Plexible-update.json` from the release assets.
+It compares versions semver-style, downloads the release zip, validates its SHA-256 hash, and verifies the Authenticode signature before installing.
+Updates are applied by a helper script that waits for Plexible to exit, swaps files with a staged copy, keeps a backup for rollback, and restarts the app.
+
+**Controls**
+- **Help > Check for Updates...** triggers a manual check.
+- **Help > Automatically Check for Updates** toggles the startup auto-check (default on).
+
+### Test Plan (Manual)
+1) Build an older version (or edit `plex_client/version.py` to `1.37.0`) and run the app from `dist\Plexible\Plexible.exe`.
+2) Publish a release using `build_exe.bat release` (ensures a newer version exists on GitHub).
+3) In the older build, open **Help > Check for Updates...**, accept the update prompt, and confirm Plexible restarts on the new version.
+4) Validate that the update folder is created under `%LOCALAPPDATA%\Plexible\updates` and that the new exe is signed.
 
 ## License
 

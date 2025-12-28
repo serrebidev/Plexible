@@ -24,6 +24,7 @@ from ..plex_service import (
     RadioSession,
     SearchHit,
 )
+from ..updater import UpdateManager
 
 
 class SearchResultsDialog(wx.Dialog):
@@ -508,6 +509,7 @@ class MainFrame(wx.Frame):
         super().__init__(None, title="Plexible", size=(1200, 800))
         self._config = config
         self._auth = auth_manager
+        self._update_manager = UpdateManager(self, config, status_callback=self._set_status)
         self._service: Optional[PlexService] = None
         self._account: Optional[MyPlexAccount] = None
         self._busy_info: Optional[wx.BusyInfo] = None
@@ -603,6 +605,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self._initialise_account()
         self._refresh_player_menu()
+        self._update_manager.schedule_auto_check()
 
     def _build_menu(self) -> None:
         menu_bar = wx.MenuBar()
@@ -631,6 +634,12 @@ class MainFrame(wx.Frame):
         menu_bar.Append(player_menu, "&Player")
         self._player_menu = player_menu
 
+        help_menu = wx.Menu()
+        self._check_updates_item = help_menu.Append(wx.ID_ANY, "Check for Updates...")
+        self._auto_update_item = help_menu.AppendCheckItem(wx.ID_ANY, "Automatically Check for Updates")
+        self._auto_update_item.Check(self._update_manager.is_auto_check_enabled())
+        menu_bar.Append(help_menu, "&Help")
+
         self.SetMenuBar(menu_bar)
 
         self.Bind(wx.EVT_MENU, self._handle_sign_in, self._signin_item)
@@ -648,6 +657,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._handle_player_volume_down, self._player_volume_down_item)
         self.Bind(wx.EVT_MENU, self._handle_player_mute, self._player_mute_item)
         self.Bind(wx.EVT_MENU, self._handle_player_fullscreen, self._player_fullscreen_item)
+        self.Bind(wx.EVT_MENU, self._handle_check_updates, self._check_updates_item)
+        self.Bind(wx.EVT_MENU, self._handle_toggle_auto_updates, self._auto_update_item)
 
         self._install_accelerators()
         self._update_menu_state()
@@ -666,6 +677,15 @@ class MainFrame(wx.Frame):
             self.SetAcceleratorTable(wx.AcceleratorTable(entries))
         except Exception:
             pass
+
+    def _handle_check_updates(self, _: wx.CommandEvent) -> None:
+        self._update_manager.check_for_updates(interactive=True)
+
+    def _handle_toggle_auto_updates(self, event: wx.CommandEvent) -> None:
+        enabled = bool(event.IsChecked())
+        self._update_manager.set_auto_check_enabled(enabled)
+        status = "Automatic update checks enabled." if enabled else "Automatic update checks disabled."
+        self._set_status(status)
 
     def _initialise_account(self) -> None:
         try:

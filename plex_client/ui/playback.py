@@ -17,6 +17,7 @@ import wx
 
 from ..config import ConfigStore
 from ..plex_service import PlayableMedia
+from ..version import APP_USER_AGENT
 
 @dataclass
 class QueueNodePayload:
@@ -976,7 +977,7 @@ class PlaybackPanel(wx.Panel):
             media.add_option(":network-caching=2000")
         if sys.platform.startswith("win"):
             media.add_option(":audio-output=directsound")
-        media.add_option(":http-user-agent=Plexible/1.0")
+        media.add_option(f":http-user-agent={APP_USER_AGENT}")
         media.add_option(":no-video-title-show")
         media.add_option(":no-osd")
         if self._resume_offset:
@@ -1009,7 +1010,7 @@ class PlaybackPanel(wx.Panel):
                 stream=True,
                 timeout=3,
                 verify=False,
-                headers={"User-Agent": "Plexible/1.0"},
+                headers={"User-Agent": APP_USER_AGENT},
             )
             resp.close()
             return resp.ok
