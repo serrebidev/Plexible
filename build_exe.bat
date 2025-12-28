@@ -101,6 +101,7 @@ set "DIST_DIR=dist\Plexible"
 set "NOTES_FILE=%ARTIFACTS_DIR%\release_notes.md"
 set "MANIFEST_FILE=%ARTIFACTS_DIR%\Plexible-update.json"
 set "DOWNLOAD_URL=https://github.com/%REPO_OWNER%/%REPO_NAME%/releases/download/v%NEXT_VERSION%/%ZIP_NAME%"
+if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
 
 if "%DRY_RUN%"=="1" (
     echo [dry-run] pyinstaller --noconfirm plexible.spec
@@ -118,7 +119,13 @@ if "%DRY_RUN%"=="1" (
     echo [dry-run] "%SIGNTOOL%" sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a "%DIST_DIR%\Plexible.exe"
 ) else (
     echo Signing executable...
-    "%SIGNTOOL%" sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a "%DIST_DIR%\Plexible.exe"
+    if defined SIGN_CERT_THUMBPRINT (
+        set "SIGN_CERT_MACHINE_FLAG="
+        if /i "%SIGN_CERT_MACHINE%"=="1" set "SIGN_CERT_MACHINE_FLAG=/sm"
+        "%SIGNTOOL%" sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %SIGN_CERT_MACHINE_FLAG% /s "%SIGN_CERT_STORE%" /sha1 "%SIGN_CERT_THUMBPRINT%" "%DIST_DIR%\Plexible.exe"
+    ) else (
+        "%SIGNTOOL%" sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a "%DIST_DIR%\Plexible.exe"
+    )
     if errorlevel 1 (
         echo Signing failed!
         popd >nul

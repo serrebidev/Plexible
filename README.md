@@ -61,6 +61,8 @@ The build script now supports automated releases and update metadata generation.
 - Windows SDK signtool available (defaults to `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe`).
 - Code signing certificate installed and accessible by signtool.
 - Optional: set `SIGNTOOL_PATH` to override the default signtool location.
+- Optional: set `SIGN_CERT_THUMBPRINT` to force signtool to use a specific cert hash (self-signed is supported for testing/public builds).
+- Optional: set `SIGN_CERT_STORE` (default `MY`) and `SIGN_CERT_MACHINE=1` for LocalMachine certs.
 
 **Commands**
 ```batch
@@ -87,6 +89,7 @@ Legacy behavior (clean + build only).
 Plexible checks GitHub Releases for the latest tag and reads `Plexible-update.json` from the release assets.
 It compares versions semver-style, downloads the release zip, validates its SHA-256 hash, and verifies the Authenticode signature before installing.
 Updates are applied by a helper script that waits for Plexible to exit, swaps files with a staged copy, keeps a backup for rollback, and restarts the app.
+For self-signed certificates, the updater accepts the pinned signing thumbprint if the OS trust chain is not available.
 
 **Controls**
 - **Help > Check for Updates...** triggers a manual check.

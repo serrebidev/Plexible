@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -24,6 +25,9 @@ GITHUB_OWNER = "serrebi"
 GITHUB_REPO = "Plexible"
 APP_EXE_NAME = "Plexible.exe"
 UPDATE_MANIFEST_NAME = "Plexible-update.json"
+TRUSTED_SIGNING_THUMBPRINTS = {
+    "9E12A2ECCBE8731BD034EC88761C766C4089EC0D",
+}
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 
@@ -94,9 +98,20 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _normalize_thumbprint(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return value.replace(" ", "").strip().upper()
+
+
 def _verify_authenticode(exe_path: Path) -> None:
     command = (
-        f"(Get-AuthenticodeSignature -LiteralPath '{exe_path}').Status"
+        "$sig = Get-AuthenticodeSignature -LiteralPath "
+        f"'{exe_path}'; "
+        "$thumb = $null; "
+        "if ($sig.SignerCertificate) { $thumb = $sig.SignerCertificate.Thumbprint }; "
+        "$obj = [pscustomobject]@{ Status = $sig.Status.ToString(); Thumbprint = $thumb }; "
+        "$obj | ConvertTo-Json -Compress"
     )
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", command],
@@ -106,9 +121,20 @@ def _verify_authenticode(exe_path: Path) -> None:
     )
     if result.returncode != 0:
         raise UpdateError(f"Authenticode verification failed: {result.stderr.strip() or result.stdout.strip()}")
-    status = (result.stdout or "").strip()
-    if status.lower() != "valid":
-        raise UpdateError(f"Authenticode status was {status or 'Unknown'}.")
+    payload = (result.stdout or "").strip()
+    try:
+        data = json.loads(payload) if payload else {}
+    except json.JSONDecodeError:
+        raise UpdateError(f"Authenticode verification failed: {payload or 'Invalid signature output.'}")
+    status = str(data.get("Status") or "").strip()
+    thumbprint = _normalize_thumbprint(data.get("Thumbprint"))
+    if status.lower() == "valid":
+        return
+    if thumbprint and thumbprint in TRUSTED_SIGNING_THUMBPRINTS:
+        return
+    if thumbprint:
+        raise UpdateError(f"Authenticode status was {status or 'Unknown'} (thumbprint {thumbprint}).")
+    raise UpdateError(f"Authenticode status was {status or 'Unknown'}.")
 
 
 class UpdateManager:
