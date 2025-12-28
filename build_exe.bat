@@ -133,6 +133,20 @@ if "%DRY_RUN%"=="1" (
     )
 )
 
+set "SIGNING_THUMBPRINT="
+if "%DRY_RUN%"=="1" (
+    echo [dry-run] Capture signing thumbprint for "%DIST_DIR%\Plexible.exe"
+) else (
+    if defined SIGN_CERT_THUMBPRINT (
+        set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
+    ) else (
+        set "SIGNING_THUMBPRINT_FILE=%ARTIFACTS_DIR%\signing_thumbprint.txt"
+        del /f /q "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
+        powershell -NoProfile -Command "$sig = Get-AuthenticodeSignature -LiteralPath '%DIST_DIR%\Plexible.exe'; if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint }" > "%SIGNING_THUMBPRINT_FILE%" 2>nul
+        if exist "%SIGNING_THUMBPRINT_FILE%" set /p SIGNING_THUMBPRINT=<"%SIGNING_THUMBPRINT_FILE%"
+    )
+)
+
 if "%DRY_RUN%"=="1" (
     echo [dry-run] Compress-Archive -Path "%DIST_DIR%" -DestinationPath "%ZIP_PATH%" -Force
 ) else (
@@ -181,7 +195,11 @@ if "%DRY_RUN%"=="1" (
         popd >nul
         exit /b 1
     )
-    python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
+    if "%SIGNING_THUMBPRINT%"=="" (
+        python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
+    ) else (
+        python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
+    )
 )
 
 if "%DO_RELEASE%"=="0" (

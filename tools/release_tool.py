@@ -155,6 +155,8 @@ def _manifest(args: argparse.Namespace) -> int:
         "published_at": args.published_at,
         "notes": notes,
     }
+    if args.signing_thumbprint:
+        manifest["signing_thumbprint"] = args.signing_thumbprint
     Path(args.output).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return 0
 
@@ -176,6 +178,7 @@ def main() -> int:
     manifest_parser.add_argument("--sha256", required=True)
     manifest_parser.add_argument("--published-at", required=True)
     manifest_parser.add_argument("--notes-file")
+    manifest_parser.add_argument("--signing-thumbprint")
     manifest_parser.add_argument("--output", required=True)
     manifest_parser.set_defaults(func=_manifest)
 

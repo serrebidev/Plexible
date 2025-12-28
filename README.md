@@ -63,6 +63,7 @@ The build script now supports automated releases and update metadata generation.
 - Optional: set `SIGNTOOL_PATH` to override the default signtool location.
 - Optional: set `SIGN_CERT_THUMBPRINT` to force signtool to use a specific cert hash (self-signed is supported for testing/public builds).
 - Optional: set `SIGN_CERT_STORE` (default `MY`) and `SIGN_CERT_MACHINE=1` for LocalMachine certs.
+- Optional: set `PLEXIBLE_TRUSTED_SIGNING_THUMBPRINTS` (comma-separated) to allow additional update signatures during testing.
 
 **Commands**
 ```batch
@@ -90,6 +91,7 @@ Plexible checks GitHub Releases for the latest tag and reads `Plexible-update.js
 It compares versions semver-style, downloads the release zip, validates its SHA-256 hash, and verifies the Authenticode signature before installing.
 Updates are applied by a helper script that waits for Plexible to exit, swaps files with a staged copy, keeps a backup for rollback, and restarts the app.
 For self-signed certificates, the updater accepts the pinned signing thumbprint if the OS trust chain is not available.
+The release manifest can include `signing_thumbprint` to allow updates signed with a specific cert, which avoids hard-coding certs in the app.
 
 **Controls**
 - **Help > Check for Updates...** triggers a manual check.

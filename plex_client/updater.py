@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 import requests
 import wx
@@ -44,6 +44,7 @@ class UpdateInfo:
     sha256: str
     published_at: str
     notes: str = ""
+    signing_thumbprints: Tuple[str, ...] = ()
 
 
 def _parse_version(version: str) -> Tuple[int, int, int]:
@@ -104,13 +105,36 @@ def _normalize_thumbprint(value: Optional[str]) -> str:
     return value.replace(" ", "").strip().upper()
 
 
-def _verify_authenticode(exe_path: Path) -> None:
+def _normalize_thumbprints(values: Iterable[str]) -> Tuple[str, ...]:
+    normalized = {_normalize_thumbprint(value) for value in values if value}
+    normalized.discard("")
+    return tuple(sorted(normalized))
+
+
+def _env_thumbprints() -> Tuple[str, ...]:
+    raw = os.environ.get("PLEXIBLE_TRUSTED_SIGNING_THUMBPRINTS", "")
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _extract_manifest_thumbprints(manifest: dict) -> Tuple[str, ...]:
+    raw = manifest.get("signing_thumbprints") or manifest.get("signing_thumbprint")
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, list):
+        return tuple(str(item).strip() for item in raw if item)
+    return ()
+
+
+def _verify_authenticode(exe_path: Path, allowed_thumbprints: Iterable[str]) -> None:
+    allowed = set(_normalize_thumbprints(allowed_thumbprints))
     command = (
         "$sig = Get-AuthenticodeSignature -LiteralPath "
         f"'{exe_path}'; "
         "$thumb = $null; "
         "if ($sig.SignerCertificate) { $thumb = $sig.SignerCertificate.Thumbprint }; "
-        "$obj = [pscustomobject]@{ Status = $sig.Status.ToString(); Thumbprint = $thumb }; "
+        "$obj = [pscustomobject]@{ Status = $sig.Status.ToString(); StatusMessage = $sig.StatusMessage; Thumbprint = $thumb }; "
         "$obj | ConvertTo-Json -Compress"
     )
     result = subprocess.run(
@@ -127,14 +151,18 @@ def _verify_authenticode(exe_path: Path) -> None:
     except json.JSONDecodeError:
         raise UpdateError(f"Authenticode verification failed: {payload or 'Invalid signature output.'}")
     status = str(data.get("Status") or "").strip()
+    status_message = str(data.get("StatusMessage") or "").strip()
     thumbprint = _normalize_thumbprint(data.get("Thumbprint"))
     if status.lower() == "valid":
         return
-    if thumbprint and thumbprint in TRUSTED_SIGNING_THUMBPRINTS:
+    if thumbprint and thumbprint in allowed:
         return
+    message = f"Authenticode status was {status or 'Unknown'}."
+    if status_message:
+        message = f"{message} {status_message}"
     if thumbprint:
-        raise UpdateError(f"Authenticode status was {status or 'Unknown'} (thumbprint {thumbprint}).")
-    raise UpdateError(f"Authenticode status was {status or 'Unknown'}.")
+        message = f"{message} (thumbprint {thumbprint})"
+    raise UpdateError(message)
 
 
 class UpdateManager:
@@ -303,7 +331,7 @@ class UpdateManager:
         app_dir = _find_app_dir(staging_root)
         exe_path = app_dir / APP_EXE_NAME
         self._set_status("Verifying update signature...")
-        _verify_authenticode(exe_path)
+        _verify_authenticode(exe_path, info.signing_thumbprints)
 
         return app_dir, backup_root
 
@@ -344,6 +372,10 @@ class UpdateManager:
         sha256 = str(manifest.get("sha256") or "").strip()
         published_at = str(manifest.get("published_at") or release.get("published_at") or "").strip()
         notes = str(manifest.get("notes") or "").strip()
+        manifest_thumbprints = _extract_manifest_thumbprints(manifest)
+        allowed_thumbprints = _normalize_thumbprints(
+            list(TRUSTED_SIGNING_THUMBPRINTS) + list(_env_thumbprints()) + list(manifest_thumbprints)
+        )
 
         tag_version = _normalize_version(tag_name)
         if version and _normalize_version(version) != tag_version:
@@ -366,6 +398,7 @@ class UpdateManager:
             sha256=sha256,
             published_at=published_at,
             notes=notes,
+            signing_thumbprints=allowed_thumbprints,
         )
 
     def _prepare_helper(self) -> Path:
