@@ -137,7 +137,7 @@ if "%DRY_RUN%"=="1" (
     echo [dry-run] Compress-Archive -Path "%DIST_DIR%" -DestinationPath "%ZIP_PATH%" -Force
 ) else (
     echo Creating release zip...
-    powershell -NoProfile -Command "Compress-Archive -Path \"%DIST_DIR%\" -DestinationPath \"%ZIP_PATH%\" -Force"
+    python -c "import os, zipfile; root=r'%DIST_DIR%'; zip_path=r'%ZIP_PATH%'; base=os.path.abspath(os.path.dirname(root)); root=os.path.abspath(root); os.makedirs(os.path.dirname(zip_path), exist_ok=True); os.remove(zip_path) if os.path.exists(zip_path) else None; z=zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED); [z.write(os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), base)) for dp, _, fs in os.walk(root) for f in fs]; z.close()"
     if errorlevel 1 (
         echo Zip creation failed!
         popd >nul
@@ -150,15 +150,16 @@ if "%DRY_RUN%"=="1" (
     echo [dry-run] Compute SHA-256 and manifest for "%ZIP_PATH%"
 ) else (
     set "ZIP_SHA="
-    set "ZIP_HASH_FILE=%ARTIFACTS_DIR%\\zip_hash.txt"
+    set "ZIP_HASH_FILE=%ARTIFACTS_DIR%\zip_hash.txt"
     del /f /q "%ZIP_HASH_FILE%" >nul 2>&1
     python -c "import hashlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); h.update(f.read()); f.close(); print(h.hexdigest())" > "%ZIP_HASH_FILE%" 2>nul
-    if exist "%ZIP_HASH_FILE%" (
-        for /f "usebackq delims=" %%A in ("%ZIP_HASH_FILE%") do set "ZIP_SHA=%%A"
-    )
+    if exist "%ZIP_HASH_FILE%" set /p ZIP_SHA=<"%ZIP_HASH_FILE%"
     if "%ZIP_SHA%"=="" (
-        for /f "usebackq tokens=1 delims= " %%A in (`certutil -hashfile "%ZIP_PATH%" SHA256 ^| findstr /r /v "hash of file" ^| findstr /r /v "CertUtil"`) do (
-            if not defined ZIP_SHA set "ZIP_SHA=%%A"
+        certutil -hashfile "%ZIP_PATH%" SHA256 > "%ZIP_HASH_FILE%" 2>nul
+        if exist "%ZIP_HASH_FILE%" (
+            for /f "usebackq tokens=1" %%A in ("%ZIP_HASH_FILE%") do (
+                if not defined ZIP_SHA set "ZIP_SHA=%%A"
+            )
         )
     )
     if "%ZIP_SHA%"=="" (
@@ -167,9 +168,13 @@ if "%DRY_RUN%"=="1" (
         exit /b 1
     )
     set "PUBLISHED_AT="
-    for /f "usebackq delims=" %%A in (`python -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())"`) do set "PUBLISHED_AT=%%A"
+    set "PUBLISHED_AT_FILE=%ARTIFACTS_DIR%\published_at.txt"
+    del /f /q "%PUBLISHED_AT_FILE%" >nul 2>&1
+    python -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())" > "%PUBLISHED_AT_FILE%" 2>nul
+    if exist "%PUBLISHED_AT_FILE%" set /p PUBLISHED_AT=<"%PUBLISHED_AT_FILE%"
     if "%PUBLISHED_AT%"=="" (
-        for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command \"(Get-Date).ToString('o')\"`) do set "PUBLISHED_AT=%%A"
+        powershell -NoProfile -Command "(Get-Date).ToString('o')" > "%PUBLISHED_AT_FILE%" 2>nul
+        if exist "%PUBLISHED_AT_FILE%" set /p PUBLISHED_AT=<"%PUBLISHED_AT_FILE%"
     )
     if "%PUBLISHED_AT%"=="" (
         echo ERROR: Failed to compute published_at timestamp.
