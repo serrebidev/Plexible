@@ -142,8 +142,28 @@ if "%DRY_RUN%"=="1" (
 if "%DRY_RUN%"=="1" (
     echo [dry-run] Compute SHA-256 and manifest for "%ZIP_PATH%"
 ) else (
-    for /f "usebackq delims=" %%A in (`python -c "import hashlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); [h.update(chunk) for chunk in iter(lambda: f.read(1024*1024), b'')]; f.close(); print(h.hexdigest())"`) do set "ZIP_SHA=%%A"
+    set "ZIP_SHA="
+    for /f "usebackq delims=" %%A in (`python -c "import hashlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); h.update(f.read()); f.close(); print(h.hexdigest())"`) do set "ZIP_SHA=%%A"
+    if "%ZIP_SHA%"=="" (
+        for /f "usebackq tokens=1 delims= " %%A in (`certutil -hashfile "%ZIP_PATH%" SHA256 ^| findstr /r /v "hash of file" ^| findstr /r /v "CertUtil"`) do (
+            if not defined ZIP_SHA set "ZIP_SHA=%%A"
+        )
+    )
+    if "%ZIP_SHA%"=="" (
+        echo ERROR: Failed to compute SHA-256 for "%ZIP_PATH%".
+        popd >nul
+        exit /b 1
+    )
+    set "PUBLISHED_AT="
     for /f "usebackq delims=" %%A in (`python -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())"`) do set "PUBLISHED_AT=%%A"
+    if "%PUBLISHED_AT%"=="" (
+        for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command \"(Get-Date).ToString('o')\"`) do set "PUBLISHED_AT=%%A"
+    )
+    if "%PUBLISHED_AT%"=="" (
+        echo ERROR: Failed to compute published_at timestamp.
+        popd >nul
+        exit /b 1
+    )
     python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
 )
 
