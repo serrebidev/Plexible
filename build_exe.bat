@@ -67,7 +67,7 @@ if "%DRY_RUN%"=="0" (
 
 set "REPO_OWNER=serrebi"
 set "REPO_NAME=Plexible"
-for /f "usebackq tokens=1,2 delims= " %%A in (`powershell -NoProfile -Command "$url = git remote get-url origin; if ($url -match 'github.com[:/](?<owner>[^/]+)/(?<repo>[^/.]+)') { \"$($Matches.owner) $($Matches.repo)\" }"`) do (
+for /f "usebackq tokens=1,2 delims= " %%A in (`python -c "import re,subprocess; url=subprocess.check_output(['git','remote','get-url','origin'], text=True).strip(); m=re.search(r'github.com[:/](.+?)/([^/.]+)', url); print((m.group(1)+' '+m.group(2)) if m else 'serrebi Plexible')"`) do (
     set "REPO_OWNER=%%A"
     set "REPO_NAME=%%B"
 )
