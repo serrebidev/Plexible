@@ -276,7 +276,7 @@ class UpdateManager:
     def _finalize_update(self, staging_dir: Path, backup_dir: Path) -> None:
         self._clear_busy()
         try:
-            helper_path = self._prepare_helper()
+            helper_path = self._prepare_helper(staging_dir)
             install_dir = Path(sys.executable).resolve().parent
             args = [
                 "cmd",
@@ -401,15 +401,20 @@ class UpdateManager:
             signing_thumbprints=allowed_thumbprints,
         )
 
-    def _prepare_helper(self) -> Path:
+    def _prepare_helper(self, staging_dir: Path) -> Path:
         update_root = _get_update_root()
         update_root.mkdir(parents=True, exist_ok=True)
         helper_target = update_root / "update_helper.bat"
-        helper_source = self._helper_template_path()
+        helper_source = self._helper_template_path(staging_dir)
         helper_target.write_text(helper_source.read_text(encoding="utf-8"), encoding="utf-8")
         return helper_target
 
-    def _helper_template_path(self) -> Path:
+    def _helper_template_path(self, staging_dir: Path) -> Path:
+        # First try the staged update (for users updating from older versions)
+        staged_helper = staging_dir / "update_helper.bat"
+        if staged_helper.exists():
+            return staged_helper
+        # Fallback to current install location
         if self._is_frozen():
             return Path(sys.executable).resolve().parent / "update_helper.bat"
         return Path(__file__).resolve().with_name("update_helper.bat")
