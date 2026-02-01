@@ -9,10 +9,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from plexapi.base import PlexObject
+from plexapi.collection import Collection
 from plexapi.exceptions import NotFound
 from plexapi.library import Folder, LibrarySection, MusicSection, Hub
 from plexapi.media import MediaPart
 from plexapi.myplex import MyPlexAccount, MyPlexResource
+from plexapi.playlist import Playlist
 from plexapi.playqueue import PlayQueue
 from plexapi.server import PlexServer
 
@@ -2166,5 +2168,844 @@ class PlexService:
             if resource.clientIdentifier == identifier:
                 return resource
         return None
+
+    # =========================================================================
+    # WATCHLIST FEATURES
+    # =========================================================================
+
+    def watchlist(
+        self,
+        filter: Optional[str] = None,
+        sort: Optional[str] = None,
+        libtype: Optional[str] = None,
+        maxresults: Optional[int] = None,
+    ) -> List[PlexObject]:
+        """Get the user's Plex watchlist."""
+        return list(self._account.watchlist(
+            filter=filter,
+            sort=sort,
+            libtype=libtype,
+            maxresults=maxresults,
+        ))
+
+    def add_to_watchlist(self, items: Any) -> None:
+        """Add item(s) to the user's watchlist."""
+        self._account.addToWatchlist(items)
+
+    def remove_from_watchlist(self, items: Any) -> None:
+        """Remove item(s) from the user's watchlist."""
+        self._account.removeFromWatchlist(items)
+
+    def on_watchlist(self, item: PlexObject) -> bool:
+        """Check if an item is on the user's watchlist."""
+        return self._account.onWatchlist(item)
+
+    # =========================================================================
+    # PLAYLIST MANAGEMENT
+    # =========================================================================
+
+    def playlists(
+        self,
+        playlist_type: Optional[str] = None,
+        section_id: Optional[int] = None,
+        title: Optional[str] = None,
+        sort: Optional[str] = None,
+    ) -> List[Playlist]:
+        """Get all playlists on the server."""
+        server = self.ensure_server()
+        return server.playlists(
+            playlistType=playlist_type,
+            sectionId=section_id,
+            title=title,
+            sort=sort,
+        )
+
+    def playlist(self, title: str) -> Playlist:
+        """Get a specific playlist by title."""
+        server = self.ensure_server()
+        return server.playlist(title)
+
+    def create_playlist(
+        self,
+        title: str,
+        section: Optional[LibrarySection] = None,
+        items: Optional[List[PlexObject]] = None,
+        smart: bool = False,
+        limit: Optional[int] = None,
+        sort: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Playlist:
+        """Create a new playlist on the server."""
+        server = self.ensure_server()
+        return server.createPlaylist(
+            title=title,
+            section=section,
+            items=items,
+            smart=smart,
+            limit=limit,
+            sort=sort,
+            filters=filters,
+            **kwargs,
+        )
+
+    def playlist_add_items(self, playlist: Playlist, items: List[PlexObject]) -> None:
+        """Add items to an existing playlist."""
+        playlist.addItems(items)
+
+    def playlist_remove_items(self, playlist: Playlist, items: List[PlexObject]) -> None:
+        """Remove items from a playlist."""
+        playlist.removeItems(items)
+
+    def playlist_move_item(
+        self,
+        playlist: Playlist,
+        item: PlexObject,
+        after: Optional[PlexObject] = None,
+    ) -> None:
+        """Move an item within a playlist."""
+        playlist.moveItem(item, after=after)
+
+    def playlist_delete(self, playlist: Playlist) -> None:
+        """Delete a playlist."""
+        playlist.delete()
+
+    def playlist_copy_to_user(self, playlist: Playlist, user: str) -> None:
+        """Copy a playlist to another user."""
+        playlist.copyToUser(user)
+
+    # =========================================================================
+    # COLLECTION MANAGEMENT
+    # =========================================================================
+
+    def collections(
+        self,
+        section: LibrarySection,
+        **kwargs: Any,
+    ) -> List[Collection]:
+        """Get all collections in a library section."""
+        return section.collections(**kwargs)
+
+    def collection(self, section: LibrarySection, title: str) -> Collection:
+        """Get a specific collection by title."""
+        return section.collection(title)
+
+    def create_collection(
+        self,
+        title: str,
+        section: LibrarySection,
+        items: Optional[List[PlexObject]] = None,
+        smart: bool = False,
+        limit: Optional[int] = None,
+        sort: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Collection:
+        """Create a new collection in a library section."""
+        server = self.ensure_server()
+        return server.createCollection(
+            title=title,
+            section=section,
+            items=items,
+            smart=smart,
+            limit=limit,
+            sort=sort,
+            filters=filters,
+            **kwargs,
+        )
+
+    def collection_add_items(self, collection: Collection, items: List[PlexObject]) -> None:
+        """Add items to a collection."""
+        collection.addItems(items)
+
+    def collection_remove_items(self, collection: Collection, items: List[PlexObject]) -> None:
+        """Remove items from a collection."""
+        collection.removeItems(items)
+
+    def collection_move_item(
+        self,
+        collection: Collection,
+        item: PlexObject,
+        after: Optional[PlexObject] = None,
+    ) -> None:
+        """Move an item within a collection."""
+        collection.moveItem(item, after=after)
+
+    def collection_delete(self, collection: Collection) -> None:
+        """Delete a collection."""
+        collection.delete()
+
+    # =========================================================================
+    # LIBRARY MANAGEMENT
+    # =========================================================================
+
+    def library_sections(self) -> List[LibrarySection]:
+        """Get all library sections."""
+        server = self.ensure_server()
+        return list(server.library.sections())
+
+    def library_section(self, title: str) -> LibrarySection:
+        """Get a specific library section by title."""
+        server = self.ensure_server()
+        return server.library.section(title)
+
+    def library_section_by_id(self, section_id: int) -> LibrarySection:
+        """Get a specific library section by ID."""
+        server = self.ensure_server()
+        return server.library.sectionByID(section_id)
+
+    def library_update(self, section: Optional[LibrarySection] = None, path: Optional[str] = None) -> None:
+        """Trigger a library scan/update."""
+        server = self.ensure_server()
+        if section:
+            section.update(path=path)
+        else:
+            server.library.update()
+
+    def library_cancel_update(self, section: Optional[LibrarySection] = None) -> None:
+        """Cancel a running library scan."""
+        server = self.ensure_server()
+        if section:
+            section.cancelUpdate()
+        else:
+            server.library.cancelUpdate()
+
+    def library_empty_trash(self, section: Optional[LibrarySection] = None) -> None:
+        """Empty the library trash."""
+        server = self.ensure_server()
+        if section:
+            section.emptyTrash()
+        else:
+            server.library.emptyTrash()
+
+    def library_clean_bundles(self) -> None:
+        """Clean unused bundles from the library."""
+        server = self.ensure_server()
+        server.library.cleanBundles()
+
+    def library_optimize(self) -> None:
+        """Optimize the library database."""
+        server = self.ensure_server()
+        server.library.optimize()
+
+    def library_refresh(self, section: LibrarySection) -> None:
+        """Refresh a library section."""
+        section.refresh()
+
+    def library_analyze(self, section: LibrarySection) -> None:
+        """Analyze all items in a library section."""
+        section.analyze()
+
+    def library_recently_added(
+        self,
+        section: Optional[LibrarySection] = None,
+        maxresults: int = 50,
+        libtype: Optional[str] = None,
+    ) -> List[PlexObject]:
+        """Get recently added items from a library section or all libraries."""
+        server = self.ensure_server()
+        if section:
+            return list(section.recentlyAdded(maxresults=maxresults, libtype=libtype))
+        return list(server.library.recentlyAdded())
+
+    def library_on_deck(self, section: Optional[LibrarySection] = None) -> List[PlexObject]:
+        """Get on-deck items from a library section or all libraries."""
+        server = self.ensure_server()
+        if section:
+            return list(section.onDeck())
+        return list(server.library.onDeck())
+
+    def library_continue_watching(self, section: Optional[LibrarySection] = None) -> List[PlexObject]:
+        """Get continue watching items from a library section or server."""
+        server = self.ensure_server()
+        if section:
+            return list(section.continueWatching())
+        return list(server.continueWatching())
+
+    def library_hubs(
+        self,
+        section: Optional[LibrarySection] = None,
+        section_id: Optional[int] = None,
+        identifier: Optional[str] = None,
+    ) -> List[Hub]:
+        """Get content hubs for discovery."""
+        server = self.ensure_server()
+        if section:
+            return list(section.hubs())
+        return list(server.library.hubs(sectionID=section_id, identifier=identifier))
+
+    # =========================================================================
+    # MEDIA MANAGEMENT
+    # =========================================================================
+
+    def remove_from_continue_watching(self, item: PlexObject) -> None:
+        """Remove an item from continue watching."""
+        if hasattr(item, "removeFromContinueWatching"):
+            item.removeFromContinueWatching()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support removeFromContinueWatching")
+
+    def mark_watched(self, item: PlexObject) -> None:
+        """Mark an item as watched."""
+        if hasattr(item, "markWatched"):
+            item.markWatched()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support markWatched")
+
+    def mark_unwatched(self, item: PlexObject) -> None:
+        """Mark an item as unwatched."""
+        if hasattr(item, "markUnwatched"):
+            item.markUnwatched()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support markUnwatched")
+
+    def upload_subtitles(self, item: PlexObject, filepath: str) -> None:
+        """Upload subtitles to a video item."""
+        if hasattr(item, "uploadSubtitles"):
+            item.uploadSubtitles(filepath)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support uploadSubtitles")
+
+    def search_subtitles(
+        self,
+        item: PlexObject,
+        language: str = "en",
+        hearing_impaired: int = 0,
+        forced: int = 0,
+    ) -> List[Any]:
+        """Search for subtitles for a video item."""
+        if hasattr(item, "searchSubtitles"):
+            return list(item.searchSubtitles(
+                language=language,
+                hearingImpaired=hearing_impaired,
+                forced=forced,
+            ))
+        raise NotImplementedError(f"Item type {type(item)} does not support searchSubtitles")
+
+    def download_subtitles(self, item: PlexObject, subtitle_stream: Any) -> None:
+        """Download and apply subtitles to a video item."""
+        if hasattr(item, "downloadSubtitles"):
+            item.downloadSubtitles(subtitle_stream)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support downloadSubtitles")
+
+    def remove_subtitles(
+        self,
+        item: PlexObject,
+        subtitle_stream: Optional[Any] = None,
+        stream_id: Optional[int] = None,
+        stream_title: Optional[str] = None,
+    ) -> None:
+        """Remove subtitles from a video item."""
+        if hasattr(item, "removeSubtitles"):
+            item.removeSubtitles(
+                subtitleStream=subtitle_stream,
+                streamID=stream_id,
+                streamTitle=stream_title,
+            )
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support removeSubtitles")
+
+    def optimize_item(
+        self,
+        item: PlexObject,
+        title: str = "",
+        target: str = "",
+        device_profile: str = "",
+        video_quality: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Create an optimized version of a video item."""
+        if hasattr(item, "optimize"):
+            item.optimize(
+                title=title,
+                target=target,
+                deviceProfile=device_profile,
+                videoQuality=video_quality,
+                **kwargs,
+            )
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support optimize")
+
+    def delete_item(self, item: PlexObject) -> None:
+        """Delete an item from the library."""
+        if hasattr(item, "delete"):
+            item.delete()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support delete")
+
+    def refresh_item(self, item: PlexObject) -> None:
+        """Refresh metadata for an item."""
+        if hasattr(item, "refresh"):
+            item.refresh()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support refresh")
+
+    def analyze_item(self, item: PlexObject) -> None:
+        """Analyze a media item."""
+        if hasattr(item, "analyze"):
+            item.analyze()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support analyze")
+
+    # =========================================================================
+    # USER/SHARING MANAGEMENT
+    # =========================================================================
+
+    def users(self) -> List[Any]:
+        """Get list of users with access to this account's servers."""
+        return list(self._account.users())
+
+    def user(self, username: str) -> Any:
+        """Get a specific user by username."""
+        return self._account.user(username)
+
+    def invite_friend(
+        self,
+        user: str,
+        server: Optional[PlexServer] = None,
+        sections: Optional[List[LibrarySection]] = None,
+        allow_sync: bool = False,
+        allow_camera_upload: bool = False,
+        allow_channels: bool = False,
+        filter_movies: Optional[Dict[str, Any]] = None,
+        filter_television: Optional[Dict[str, Any]] = None,
+        filter_music: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Invite a friend to share your Plex server."""
+        target_server = server or self.ensure_server()
+        self._account.inviteFriend(
+            user=user,
+            server=target_server,
+            sections=sections,
+            allowSync=allow_sync,
+            allowCameraUpload=allow_camera_upload,
+            allowChannels=allow_channels,
+            filterMovies=filter_movies,
+            filterTelevision=filter_television,
+            filterMusic=filter_music,
+        )
+
+    def remove_friend(self, user: str) -> None:
+        """Remove a friend from sharing."""
+        self._account.removeFriend(user)
+
+    def update_friend(
+        self,
+        user: str,
+        server: Optional[PlexServer] = None,
+        sections: Optional[List[LibrarySection]] = None,
+        remove_sections: bool = False,
+        allow_sync: Optional[bool] = None,
+        allow_camera_upload: Optional[bool] = None,
+        allow_channels: Optional[bool] = None,
+        filter_movies: Optional[Dict[str, Any]] = None,
+        filter_television: Optional[Dict[str, Any]] = None,
+        filter_music: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Update sharing settings for a friend."""
+        target_server = server or self.ensure_server()
+        self._account.updateFriend(
+            user=user,
+            server=target_server,
+            sections=sections,
+            removeSections=remove_sections,
+            allowSync=allow_sync,
+            allowCameraUpload=allow_camera_upload,
+            allowChannels=allow_channels,
+            filterMovies=filter_movies,
+            filterTelevision=filter_television,
+            filterMusic=filter_music,
+        )
+
+    def pending_invites(
+        self,
+        include_sent: bool = True,
+        include_received: bool = True,
+    ) -> List[Any]:
+        """Get pending friend invites."""
+        return list(self._account.pendingInvites(
+            includeSent=include_sent,
+            includeReceived=include_received,
+        ))
+
+    def accept_invite(self, user: str) -> None:
+        """Accept a pending friend invite."""
+        self._account.acceptInvite(user)
+
+    def cancel_invite(self, user: str) -> None:
+        """Cancel a pending friend invite."""
+        self._account.cancelInvite(user)
+
+    def create_home_user(
+        self,
+        user: str,
+        server: Optional[PlexServer] = None,
+        sections: Optional[List[LibrarySection]] = None,
+        allow_sync: bool = False,
+        allow_camera_upload: bool = False,
+        allow_channels: bool = False,
+        filter_movies: Optional[Dict[str, Any]] = None,
+        filter_television: Optional[Dict[str, Any]] = None,
+        filter_music: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Create a managed home user."""
+        target_server = server or self.ensure_server()
+        self._account.createHomeUser(
+            user=user,
+            server=target_server,
+            sections=sections,
+            allowSync=allow_sync,
+            allowCameraUpload=allow_camera_upload,
+            allowChannels=allow_channels,
+            filterMovies=filter_movies,
+            filterTelevision=filter_television,
+            filterMusic=filter_music,
+        )
+
+    def remove_home_user(self, user: str) -> None:
+        """Remove a managed home user."""
+        self._account.removeHomeUser(user)
+
+    def switch_home_user(self, user: str, pin: Optional[str] = None) -> MyPlexAccount:
+        """Switch to a different home user."""
+        return self._account.switchHomeUser(user, pin=pin)
+
+    def switch_server_user(self, user: str, session: Optional[Any] = None, timeout: Optional[int] = None) -> PlexServer:
+        """Switch user on the current server."""
+        server = self.ensure_server()
+        return server.switchUser(user, session=session, timeout=timeout)
+
+    # =========================================================================
+    # SERVER ADMINISTRATION
+    # =========================================================================
+
+    def server_settings(self) -> Any:
+        """Get server settings."""
+        server = self.ensure_server()
+        return server.settings
+
+    def server_activities(self) -> List[Any]:
+        """Get currently running server activities."""
+        server = self.ensure_server()
+        return list(server.activities())
+
+    def server_sessions(self) -> List[Any]:
+        """Get active playback sessions."""
+        server = self.ensure_server()
+        return list(server.sessions())
+
+    def transcode_sessions(self) -> List[Any]:
+        """Get active transcode sessions."""
+        server = self.ensure_server()
+        return list(server.transcodeSessions())
+
+    def butler_tasks(self) -> List[Any]:
+        """Get available butler (maintenance) tasks."""
+        server = self.ensure_server()
+        return list(server.butlerTasks())
+
+    def run_butler_task(self, task: str) -> None:
+        """Run a butler task."""
+        server = self.ensure_server()
+        server.runButlerTask(task)
+
+    def check_for_update(self, force: bool = True, download: bool = False) -> Any:
+        """Check for Plex server updates."""
+        server = self.ensure_server()
+        return server.checkForUpdate(force=force, download=download)
+
+    def is_latest_version(self) -> bool:
+        """Check if the server is running the latest version."""
+        server = self.ensure_server()
+        return server.isLatest()
+
+    def can_install_update(self) -> bool:
+        """Check if an update can be installed."""
+        server = self.ensure_server()
+        return server.canInstallUpdate()
+
+    def install_update(self) -> None:
+        """Install a pending server update."""
+        server = self.ensure_server()
+        server.installUpdate()
+
+    def server_identity(self) -> Any:
+        """Get server identity information."""
+        server = self.ensure_server()
+        return server.identity
+
+    def server_account(self) -> Any:
+        """Get the MyPlex account associated with the server."""
+        server = self.ensure_server()
+        return server.account()
+
+    def system_accounts(self) -> List[Any]:
+        """Get system accounts on the server."""
+        server = self.ensure_server()
+        return list(server.systemAccounts())
+
+    def system_devices(self) -> List[Any]:
+        """Get system devices on the server."""
+        server = self.ensure_server()
+        return list(server.systemDevices())
+
+    def optimized_items(self, remove_all: Optional[bool] = None) -> List[Any]:
+        """Get or manage optimized items."""
+        server = self.ensure_server()
+        return list(server.optimizedItems(removeAll=remove_all))
+
+    def conversions(self, pause: Optional[bool] = None) -> List[Any]:
+        """Get or manage conversion tasks."""
+        server = self.ensure_server()
+        return list(server.conversions(pause=pause))
+
+    def current_background_process(self) -> Any:
+        """Get the currently running background process."""
+        server = self.ensure_server()
+        return server.currentBackgroundProcess()
+
+    # =========================================================================
+    # HISTORY
+    # =========================================================================
+
+    def history(
+        self,
+        maxresults: Optional[int] = None,
+        mindate: Optional[Any] = None,
+        rating_key: Optional[int] = None,
+        account_id: Optional[int] = None,
+        library_section_id: Optional[int] = None,
+    ) -> List[Any]:
+        """Get watch history from the server."""
+        server = self.ensure_server()
+        return list(server.history(
+            maxresults=maxresults,
+            mindate=mindate,
+            ratingKey=rating_key,
+            accountID=account_id,
+            librarySectionID=library_section_id,
+        ))
+
+    def section_history(
+        self,
+        section: LibrarySection,
+        maxresults: Optional[int] = None,
+        mindate: Optional[Any] = None,
+    ) -> List[Any]:
+        """Get watch history for a specific library section."""
+        return list(section.history(maxresults=maxresults, mindate=mindate))
+
+    def account_history(
+        self,
+        maxresults: Optional[int] = None,
+        mindate: Optional[Any] = None,
+    ) -> List[Any]:
+        """Get watch history from the account (cross-server)."""
+        return list(self._account.history(maxresults=maxresults, mindate=mindate))
+
+    # =========================================================================
+    # DOWNLOAD FEATURES
+    # =========================================================================
+
+    def download_item(
+        self,
+        item: PlexObject,
+        savepath: Optional[str] = None,
+        keep_original_name: bool = False,
+        **kwargs: Any,
+    ) -> List[str]:
+        """Download a media item."""
+        if hasattr(item, "download"):
+            return list(item.download(
+                savepath=savepath,
+                keep_original_name=keep_original_name,
+                **kwargs,
+            ))
+        raise NotImplementedError(f"Item type {type(item)} does not support download")
+
+    def download_databases(
+        self,
+        savepath: Optional[str] = None,
+        unpack: bool = False,
+    ) -> str:
+        """Download server database backup."""
+        server = self.ensure_server()
+        return server.downloadDatabases(savepath=savepath, unpack=unpack)
+
+    def download_logs(
+        self,
+        savepath: Optional[str] = None,
+        unpack: bool = False,
+    ) -> str:
+        """Download server logs."""
+        server = self.ensure_server()
+        return server.downloadLogs(savepath=savepath, unpack=unpack)
+
+    # =========================================================================
+    # SYNC FEATURES
+    # =========================================================================
+
+    def sync_items(self, client: Optional[Any] = None, client_id: Optional[str] = None) -> List[Any]:
+        """Get sync items for a client."""
+        return list(self._account.syncItems(client=client, clientId=client_id))
+
+    def refresh_sync_list(self) -> None:
+        """Refresh the sync list."""
+        server = self.ensure_server()
+        server.refreshSynclist()
+
+    def refresh_sync(self) -> None:
+        """Refresh sync."""
+        server = self.ensure_server()
+        server.refreshSync()
+
+    # =========================================================================
+    # DISCOVERY FEATURES
+    # =========================================================================
+
+    def search_discover(
+        self,
+        query: str,
+        limit: int = 30,
+        libtype: Optional[str] = None,
+        providers: str = "discover",
+    ) -> List[Any]:
+        """Search Plex Discover for movies and shows."""
+        return list(self._account.searchDiscover(
+            query=query,
+            limit=limit,
+            libtype=libtype,
+            providers=providers,
+        ))
+
+    def video_on_demand(self) -> Any:
+        """Get Plex video on demand content."""
+        return self._account.videoOnDemand()
+
+    def online_media_sources(self) -> List[Any]:
+        """Get online media sources."""
+        return list(self._account.onlineMediaSources())
+
+    # =========================================================================
+    # WEBHOOKS
+    # =========================================================================
+
+    def webhooks(self) -> List[str]:
+        """Get configured webhooks."""
+        return list(self._account.webhooks())
+
+    def add_webhook(self, url: str) -> None:
+        """Add a webhook URL."""
+        self._account.addWebhook(url)
+
+    def delete_webhook(self, url: str) -> None:
+        """Delete a webhook URL."""
+        self._account.deleteWebhook(url)
+
+    def set_webhooks(self, urls: List[str]) -> None:
+        """Set all webhook URLs."""
+        self._account.setWebhooks(urls)
+
+    # =========================================================================
+    # ALERT LISTENER
+    # =========================================================================
+
+    def start_alert_listener(
+        self,
+        callback: Optional[Callable[[Any], None]] = None,
+        callback_error: Optional[Callable[[Exception], None]] = None,
+    ) -> Any:
+        """Start a real-time alert listener for server events."""
+        server = self.ensure_server()
+        return server.startAlertListener(callback=callback, callbackError=callback_error)
+
+    # =========================================================================
+    # ACCOUNT FEATURES
+    # =========================================================================
+
+    def account_opt_out(
+        self,
+        playback: Optional[bool] = None,
+        library: Optional[bool] = None,
+    ) -> None:
+        """Opt out of Plex data collection."""
+        self._account.optOut(playback=playback, library=library)
+
+    def claim_token(self) -> str:
+        """Get a claim token for the account."""
+        return self._account.claimToken()
+
+    def devices(self) -> List[Any]:
+        """Get devices associated with the account."""
+        return list(self._account.devices())
+
+    def device(self, name: Optional[str] = None, client_id: Optional[str] = None) -> Any:
+        """Get a specific device."""
+        return self._account.device(name=name, clientId=client_id)
+
+    # =========================================================================
+    # CLIENTS
+    # =========================================================================
+
+    def clients(self) -> List[Any]:
+        """Get connected Plex clients."""
+        server = self.ensure_server()
+        return list(server.clients())
+
+    def client(self, name: str) -> Any:
+        """Get a specific client by name."""
+        server = self.ensure_server()
+        return server.client(name)
+
+    # =========================================================================
+    # BANDWIDTH/STATISTICS
+    # =========================================================================
+
+    def bandwidth(self, timespan: Optional[str] = None, **kwargs: Any) -> List[Any]:
+        """Get bandwidth statistics."""
+        server = self.ensure_server()
+        return list(server.bandwidth(timespan=timespan, **kwargs))
+
+    # =========================================================================
+    # WEB URL GENERATION
+    # =========================================================================
+
+    def get_web_url(self, item: Optional[PlexObject] = None, base: Optional[str] = None) -> str:
+        """Get the Plex Web URL for an item or the server."""
+        server = self.ensure_server()
+        if item and hasattr(item, "getWebURL"):
+            return item.getWebURL(base=base)
+        return server.getWebURL(base=base)
+
+    # =========================================================================
+    # UTILITY METHODS
+    # =========================================================================
+
+    def transcode_image(
+        self,
+        image_url: str,
+        height: int,
+        width: int,
+        **kwargs: Any,
+    ) -> str:
+        """Get a transcoded image URL."""
+        server = self.ensure_server()
+        return server.transcodeImage(image_url, height, width, **kwargs)
+
+    def browse_server(self, path: Optional[str] = None, include_files: bool = True) -> List[Any]:
+        """Browse the server filesystem."""
+        server = self.ensure_server()
+        return list(server.browse(path=path, includeFiles=include_files))
+
+    def walk_server(self, path: Optional[str] = None) -> Any:
+        """Walk the server filesystem."""
+        server = self.ensure_server()
+        return server.walk(path=path)
+
+    def is_browsable(self, path: str) -> bool:
+        """Check if a path is browsable on the server."""
+        server = self.ensure_server()
+        return server.isBrowsable(path)
 
 
