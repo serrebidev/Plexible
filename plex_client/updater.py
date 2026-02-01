@@ -26,7 +26,7 @@ GITHUB_REPO = "Plexible"
 APP_EXE_NAME = "Plexible.exe"
 UPDATE_MANIFEST_NAME = "Plexible-update.json"
 TRUSTED_SIGNING_THUMBPRINTS = {
-    "9E12A2ECCBE8731BD034EC88761C766C4089EC0D",
+    "FB99DDCECA07B170E0A950F0C780AD899D28D770",
 }
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
@@ -410,13 +410,21 @@ class UpdateManager:
         return helper_target
 
     def _helper_template_path(self, staging_dir: Path) -> Path:
-        # First try the staged update (for users updating from older versions)
+        # First try the staged update root (for users updating from older versions)
         staged_helper = staging_dir / "update_helper.bat"
         if staged_helper.exists():
             return staged_helper
+        # Try _internal folder (PyInstaller onedir mode)
+        staged_internal = staging_dir / "_internal" / "update_helper.bat"
+        if staged_internal.exists():
+            return staged_internal
         # Fallback to current install location
         if self._is_frozen():
-            return Path(sys.executable).resolve().parent / "update_helper.bat"
+            install_dir = Path(sys.executable).resolve().parent
+            # Check root first, then _internal
+            if (install_dir / "update_helper.bat").exists():
+                return install_dir / "update_helper.bat"
+            return install_dir / "_internal" / "update_helper.bat"
         return Path(__file__).resolve().with_name("update_helper.bat")
 
     def _set_status(self, message: str) -> None:

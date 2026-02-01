@@ -81,6 +81,8 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
+    # Add update_helper.bat to the root of the distribution
+    [('update_helper.bat', 'plex_client/update_helper.bat', 'DATA')],
     strip=False,
     upx=True,
     upx_exclude=[],
