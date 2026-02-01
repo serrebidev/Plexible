@@ -24,9 +24,14 @@ robocopy "%INSTALL_DIR%" "%BACKUP_DIR%" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS
 set "RC=%ERRORLEVEL%"
 if %RC% GEQ 8 goto :backup_failed
 
-robocopy "%STAGING_DIR%" "%INSTALL_DIR%" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS
+robocopy "%STAGING_DIR%" "%INSTALL_DIR%" /E /R:2 /W:2 /NFL /NDL /NJH /NJS
 set "RC=%ERRORLEVEL%"
 if %RC% GEQ 8 goto :rollback
+
+rem Restore config.json from backup if it exists
+if exist "%BACKUP_DIR%\config.json" (
+    copy /y "%BACKUP_DIR%\config.json" "%INSTALL_DIR%\config.json" >nul 2>&1
+)
 
 goto :restart
 
