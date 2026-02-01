@@ -20,16 +20,30 @@ if not "%PID%"=="" call :wait_for_pid "%PID%"
 if exist "%BACKUP_DIR%" rd /s /q "%BACKUP_DIR%"
 mkdir "%BACKUP_DIR%" >nul 2>&1
 
+rem Backup the current installation
 robocopy "%INSTALL_DIR%" "%BACKUP_DIR%" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS
 set "RC=%ERRORLEVEL%"
 if %RC% GEQ 8 goto :backup_failed
 
+rem Clean install directory except config.json, then copy new files
+rem First, save config.json if it exists
+if exist "%INSTALL_DIR%\config.json" (
+    copy /y "%INSTALL_DIR%\config.json" "%BACKUP_DIR%\config.json.save" >nul 2>&1
+)
+
+rem Remove all files and folders in install dir
+for /d %%D in ("%INSTALL_DIR%\*") do rd /s /q "%%D" 2>nul
+del /q "%INSTALL_DIR%\*" 2>nul
+
+rem Copy new files from staging
 robocopy "%STAGING_DIR%" "%INSTALL_DIR%" /E /R:2 /W:2 /NFL /NDL /NJH /NJS
 set "RC=%ERRORLEVEL%"
 if %RC% GEQ 8 goto :rollback
 
-rem Restore config.json from backup if it exists
-if exist "%BACKUP_DIR%\config.json" (
+rem Restore config.json from backup
+if exist "%BACKUP_DIR%\config.json.save" (
+    copy /y "%BACKUP_DIR%\config.json.save" "%INSTALL_DIR%\config.json" >nul 2>&1
+) else if exist "%BACKUP_DIR%\config.json" (
     copy /y "%BACKUP_DIR%\config.json" "%INSTALL_DIR%\config.json" >nul 2>&1
 )
 
