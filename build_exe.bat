@@ -13,20 +13,54 @@ echo Usage: build_exe.bat ^<legacy^|build^|release^|dry-run^>
 exit /b 1
 
 :legacy
+for %%I in ("%~f0") do set "ROOT_DIR=%%~dpI"
+pushd "%ROOT_DIR%" >nul
+if errorlevel 1 (
+    echo ERROR: Unable to change to script directory "%ROOT_DIR%".
+    exit /b 1
+)
+set "ROOT_DIR=%CD%"
+if not "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR%\"
+set "ROOT_DIR_NOSLASH=%ROOT_DIR:~0,-1%"
+if not exist "%ROOT_DIR%main.py" (
+    echo ERROR: Refusing legacy build outside the repository root. Missing "%ROOT_DIR%main.py".
+    popd >nul
+    exit /b 1
+)
+if not exist "%ROOT_DIR%plexible.spec" (
+    echo ERROR: Refusing legacy build outside the repository root. Missing "%ROOT_DIR%plexible.spec".
+    popd >nul
+    exit /b 1
+)
+if not exist "%ROOT_DIR%.git\" if not exist "%ROOT_DIR%.git" (
+    echo ERROR: Refusing legacy build outside a git checkout. Missing "%ROOT_DIR%.git".
+    popd >nul
+    exit /b 1
+)
 echo Cleaning up old build artifacts...
-if exist build rd /s /q build
-if exist dist rd /s /q dist
+call :safe_remove_dir "%ROOT_DIR%build" "%ROOT_DIR_NOSLASH%" "build"
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
+)
+call :safe_remove_dir "%ROOT_DIR%dist" "%ROOT_DIR_NOSLASH%" "dist"
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
+)
 
 echo Running PyInstaller...
-pyinstaller --noconfirm plexible.spec
+pyinstaller --noconfirm "%ROOT_DIR%plexible.spec"
 
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Build successful!
-    echo Executable can be found in: dist\Plexible\Plexible.exe
+    echo Executable can be found in: %ROOT_DIR%dist\Plexible\Plexible.exe
+    popd >nul
 ) else (
     echo.
     echo Build failed!
+    popd >nul
     exit /b %ERRORLEVEL%
 )
 exit /b 0
@@ -79,6 +113,12 @@ set "ARTIFACTS_DIR=%ROOT_DIR%release"
 set "SPEC_FILE=%ROOT_DIR%plexible.spec"
 set "VERSION_FILE=%ROOT_DIR%plex_client\version.py"
 set "RELEASE_TOOL=%ROOT_DIR%tools\release_tool.py"
+set "NOTES_FILE=%ARTIFACTS_DIR%\release_notes.md"
+set "MANIFEST_FILE=%ARTIFACTS_DIR%\Plexible-update.json"
+if "%DO_RELEASE%"=="0" (
+    set "NOTES_FILE=%ARTIFACTS_DIR%\release_notes.local.md"
+    set "MANIFEST_FILE=%ARTIFACTS_DIR%\Plexible-update.local.json"
+)
 
 set "SIGNTOOL_DEFAULT=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
 if defined SIGNTOOL_PATH (
@@ -121,7 +161,11 @@ if "%DRY_RUN%"=="1" (
 if "%DRY_RUN%"=="1" (
     for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute`) do set "%%A=%%B"
 ) else (
-    for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute --version-file "%VERSION_FILE%" --notes-file "%ARTIFACTS_DIR%\release_notes.md" --apply`) do set "%%A=%%B"
+    if "%DO_RELEASE%"=="1" (
+        for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute --version-file "%VERSION_FILE%" --notes-file "%NOTES_FILE%" --apply`) do set "%%A=%%B"
+    ) else (
+        for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute --notes-file "%NOTES_FILE%"`) do set "%%A=%%B"
+    )
 )
 
 if "%NEXT_VERSION%"=="" (
@@ -134,8 +178,6 @@ set "ZIP_NAME=Plexible-v%NEXT_VERSION%.zip"
 set "ZIP_PATH=%ROOT_DIR%%ZIP_NAME%"
 set "ZIP_LATEST=%ROOT_DIR%Plexible.zip"
 set "DIST_DIR=%DIST_ROOT%\Plexible"
-set "NOTES_FILE=%ARTIFACTS_DIR%\release_notes.md"
-set "MANIFEST_FILE=%ARTIFACTS_DIR%\Plexible-update.json"
 set "DOWNLOAD_URL=https://github.com/%REPO_OWNER%/%REPO_NAME%/releases/download/v%NEXT_VERSION%/%ZIP_NAME%"
 if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
 
@@ -207,9 +249,10 @@ if "%DRY_RUN%"=="1" (
     if "%ZIP_SHA%"=="" (
         certutil -hashfile "%ZIP_PATH%" SHA256 > "%ZIP_HASH_FILE%" 2>nul
         if exist "%ZIP_HASH_FILE%" (
-            for /f "usebackq tokens=1" %%A in ("%ZIP_HASH_FILE%") do (
+            for /f "usebackq delims=" %%A in (`findstr /R /I "^[0-9A-F ][0-9A-F ]*$" "%ZIP_HASH_FILE%"`) do (
                 if not defined ZIP_SHA set "ZIP_SHA=%%A"
             )
+            if defined ZIP_SHA set "ZIP_SHA=!ZIP_SHA: =!"
         )
     )
     if "%ZIP_SHA%"=="" (
@@ -326,11 +369,11 @@ if /i "%SAFE_TARGET%"=="%SAFE_ROOT%" (
     exit /b 1
 )
 if /i not "!SAFE_TARGET_PARENT!"=="%SAFE_ROOT%" (
-    echo ERROR: Refusing to remove "!SAFE_TARGET!" because parent is "!SAFE_TARGET_PARENT!" (expected "%SAFE_ROOT%").
+    echo ERROR: Refusing to remove "!SAFE_TARGET!" because parent is "!SAFE_TARGET_PARENT!"; expected "%SAFE_ROOT%".
     exit /b 1
 )
 if /i not "!SAFE_TARGET_NAME!"=="%SAFE_EXPECTED_NAME%" (
-    echo ERROR: Refusing to remove "!SAFE_TARGET!" because name is "!SAFE_TARGET_NAME!" (expected "%SAFE_EXPECTED_NAME%").
+    echo ERROR: Refusing to remove "!SAFE_TARGET!" because name is "!SAFE_TARGET_NAME!"; expected "%SAFE_EXPECTED_NAME%".
     exit /b 1
 )
 if exist "!SAFE_TARGET!\" rd /s /q "!SAFE_TARGET!"
