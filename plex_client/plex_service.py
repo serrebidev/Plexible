@@ -923,11 +923,35 @@ class PlexService:
     def _music_category_direct_items(self, section: MusicSection, category: str) -> List[object]:
         try:
             if category == "artists":
-                return list(section.searchArtists(sort="titleSort:asc", maxresults=200))
+                return list(
+                    self._call_with_supported_kwargs(
+                        section.searchArtists,
+                        aliases={"maxresults": ("maxResults",)},
+                        sort="titleSort:asc",
+                        maxresults=200,
+                    )
+                    or []
+                )
             if category == "albums":
-                return list(section.searchAlbums(sort="titleSort:asc", maxresults=200))
+                return list(
+                    self._call_with_supported_kwargs(
+                        section.searchAlbums,
+                        aliases={"maxresults": ("maxResults",)},
+                        sort="titleSort:asc",
+                        maxresults=200,
+                    )
+                    or []
+                )
             if category == "tracks":
-                return list(section.searchTracks(sort="titleSort:asc", maxresults=200))
+                return list(
+                    self._call_with_supported_kwargs(
+                        section.searchTracks,
+                        aliases={"maxresults": ("maxResults",)},
+                        sort="titleSort:asc",
+                        maxresults=200,
+                    )
+                    or []
+                )
         except Exception as exc:  # noqa: BLE001
             print(f"[MusicCategory] Direct lookup failed for '{category}': {exc}")
         return []
@@ -935,11 +959,25 @@ class PlexService:
     def _music_recently_added(self, section: MusicSection) -> List[PlexObject]:
         items: List[PlexObject] = []
         try:
-            items.extend(section.recentlyAddedAlbums(maxresults=60))
+            items.extend(
+                self._call_with_supported_kwargs(
+                    section.recentlyAddedAlbums,
+                    aliases={"maxresults": ("maxResults",)},
+                    maxresults=60,
+                )
+                or []
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[MusicCategory] Unable to load recently added albums: {exc}")
         try:
-            items.extend(section.recentlyAddedTracks(maxresults=120))
+            items.extend(
+                self._call_with_supported_kwargs(
+                    section.recentlyAddedTracks,
+                    aliases={"maxresults": ("maxResults",)},
+                    maxresults=120,
+                )
+                or []
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[MusicCategory] Unable to load recently added tracks: {exc}")
         return self._dedupe_media_items(items)
@@ -950,7 +988,14 @@ class PlexService:
         except Exception:
             return []
         try:
-            playlists = list(server.playlists(playlistType="audio"))
+            playlists = list(
+                self._call_with_supported_kwargs(
+                    server.playlists,
+                    aliases={"playlistType": ("playlist_type",)},
+                    playlistType="audio",
+                )
+                or []
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[MusicCategory] Unable to load audio playlists: {exc}")
             return []
@@ -1108,7 +1153,14 @@ class PlexService:
         except Exception:
             return []
         try:
-            playlists = list(server.playlists(playlistType="audio"))
+            playlists = list(
+                self._call_with_supported_kwargs(
+                    server.playlists,
+                    aliases={"playlistType": ("playlist_type",)},
+                    playlistType="audio",
+                )
+                or []
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[Radio] Unable to enumerate playlists for fallback: {exc}")
             return []
@@ -1202,14 +1254,36 @@ class PlexService:
         candidates: List[PlexObject] = []
         try:
             if mode == "recent_radio":
-                candidates.extend(section.recentlyAddedTracks(maxresults=200) or [])
+                candidates.extend(
+                    self._call_with_supported_kwargs(
+                        section.recentlyAddedTracks,
+                        aliases={"maxresults": ("maxResults",)},
+                        maxresults=200,
+                    )
+                    or []
+                )
             else:
-                candidates.extend(section.searchTracks(sort="titleSort:asc", maxresults=200) or [])
+                candidates.extend(
+                    self._call_with_supported_kwargs(
+                        section.searchTracks,
+                        aliases={"maxresults": ("maxResults",)},
+                        sort="titleSort:asc",
+                        maxresults=200,
+                    )
+                    or []
+                )
         except Exception as exc:  # noqa: BLE001
             print(f"[Radio] Unable to gather seed tracks for {mode}: {exc}")
         if not candidates and mode != "recent_radio":
             try:
-                candidates.extend(section.recentlyAddedTracks(maxresults=100) or [])
+                candidates.extend(
+                    self._call_with_supported_kwargs(
+                        section.recentlyAddedTracks,
+                        aliases={"maxresults": ("maxResults",)},
+                        maxresults=100,
+                    )
+                    or []
+                )
             except Exception:
                 pass
         if sample_only:
@@ -1659,7 +1733,15 @@ class PlexService:
         if not query:
             return []
         server = self.ensure_server()
-        return server.search(query, limit=limit)
+        return list(
+            self._call_with_supported_kwargs(
+                server.search,
+                query,
+                aliases={"limit": ("maxresults",)},
+                limit=limit,
+            )
+            or []
+        )
 
     def fetch_item(self, rating_key: str) -> PlexObject:
         server = self.ensure_server()
@@ -2021,11 +2103,16 @@ class PlexService:
             else:
                 send_state = "paused"
         try:
-            item.updateTimeline(bounded_position, state=send_state, duration=bounded_duration)
+            self._call_with_supported_kwargs(
+                item.updateTimeline,
+                bounded_position,
+                state=send_state,
+                duration=bounded_duration,
+            )
             if bounded_position > 0 and bounded_duration:
                 progress_state = "stopped" if state == "stopped" else send_state
                 try:
-                    item.updateProgress(bounded_position, state=progress_state)
+                    self._call_with_supported_kwargs(item.updateProgress, bounded_position, state=progress_state)
                 except Exception as exc:
                     print(f"[Timeline] Failed to update progress: {exc}")
             media.resume_offset = bounded_position
@@ -2060,7 +2147,7 @@ class PlexService:
             wait_for = min(0.5, remaining) or 0.05
             if state == "stopped" and bounded_position > 0 and send_state != "stopped":
                 try:
-                    item.updateProgress(bounded_position, state="stopped")
+                    self._call_with_supported_kwargs(item.updateProgress, bounded_position, state="stopped")
                 except Exception:
                     pass
             print(
@@ -2132,7 +2219,15 @@ class PlexService:
                     on_status(msg)
                 return local_hits, local_errors
             try:
-                results = server.search(query, limit=limit_per_server)
+                results = list(
+                    self._call_with_supported_kwargs(
+                        server.search,
+                        query,
+                        aliases={"limit": ("maxresults",)},
+                        limit=limit_per_server,
+                    )
+                    or []
+                )
                 msg = f"{name}: {len(results)} result(s) for '{query}'"
                 print(f"[Search] {msg}")
                 if on_status:
@@ -2219,12 +2314,20 @@ class PlexService:
         maxresults: Optional[int] = None,
     ) -> List[PlexObject]:
         """Get the user's Plex watchlist."""
-        return list(self._account.watchlist(
-            filter=filter,
-            sort=sort,
-            libtype=libtype,
-            maxresults=maxresults,
-        ))
+        return list(
+            self._call_with_supported_kwargs(
+                self._account.watchlist,
+                aliases={
+                    "libtype": ("libType",),
+                    "maxresults": ("maxResults",),
+                },
+                filter=filter,
+                sort=sort,
+                libtype=libtype,
+                maxresults=maxresults,
+            )
+            or []
+        )
 
     def add_to_watchlist(self, items: Any) -> None:
         """Add item(s) to the user's watchlist."""
@@ -2251,11 +2354,19 @@ class PlexService:
     ) -> List[Playlist]:
         """Get all playlists on the server."""
         server = self.ensure_server()
-        return server.playlists(
-            playlistType=playlist_type,
-            sectionId=section_id,
-            title=title,
-            sort=sort,
+        return list(
+            self._call_with_supported_kwargs(
+                server.playlists,
+                aliases={
+                    "playlistType": ("playlist_type",),
+                    "sectionId": ("sectionID", "section_id"),
+                },
+                playlistType=playlist_type,
+                sectionId=section_id,
+                title=title,
+                sort=sort,
+            )
+            or []
         )
 
     def playlist(self, title: str) -> Playlist:
@@ -2308,7 +2419,12 @@ class PlexService:
         after: Optional[PlexObject] = None,
     ) -> None:
         """Move an item within a playlist."""
-        playlist.moveItem(item, after=after)
+        self._call_with_supported_kwargs(
+            playlist.moveItem,
+            item,
+            aliases={"after": ("afterItem", "after_item")},
+            after=after,
+        )
 
     def playlist_delete(self, playlist: Playlist) -> None:
         """Delete a playlist."""
@@ -2328,7 +2444,7 @@ class PlexService:
         **kwargs: Any,
     ) -> List[Collection]:
         """Get all collections in a library section."""
-        return section.collections(**kwargs)
+        return self._call_with_supported_kwargs(section.collections, **kwargs)
 
     def collection(self, section: LibrarySection, title: str) -> Collection:
         """Get a specific collection by title."""
@@ -2379,7 +2495,12 @@ class PlexService:
         after: Optional[PlexObject] = None,
     ) -> None:
         """Move an item within a collection."""
-        collection.moveItem(item, after=after)
+        self._call_with_supported_kwargs(
+            collection.moveItem,
+            item,
+            aliases={"after": ("afterItem", "after_item")},
+            after=after,
+        )
 
     def collection_delete(self, collection: Collection) -> None:
         """Delete a collection."""
@@ -2408,7 +2529,7 @@ class PlexService:
         """Trigger a library scan/update."""
         server = self.ensure_server()
         if section:
-            section.update(path=path)
+            self._call_with_supported_kwargs(section.update, path=path)
         else:
             server.library.update()
 
@@ -2554,11 +2675,16 @@ class PlexService:
     ) -> List[Any]:
         """Search for subtitles for a video item."""
         if hasattr(item, "searchSubtitles"):
-            return list(item.searchSubtitles(
-                language=language,
-                hearingImpaired=hearing_impaired,
-                forced=forced,
-            ))
+            return list(
+                self._call_with_supported_kwargs(
+                    item.searchSubtitles,
+                    aliases={"hearingImpaired": ("hearing_impaired",)},
+                    language=language,
+                    hearingImpaired=hearing_impaired,
+                    forced=forced,
+                )
+                or []
+            )
         raise NotImplementedError(f"Item type {type(item)} does not support searchSubtitles")
 
     def download_subtitles(self, item: PlexObject, subtitle_stream: Any) -> None:
@@ -2577,7 +2703,13 @@ class PlexService:
     ) -> None:
         """Remove subtitles from a video item."""
         if hasattr(item, "removeSubtitles"):
-            item.removeSubtitles(
+            self._call_with_supported_kwargs(
+                item.removeSubtitles,
+                aliases={
+                    "subtitleStream": ("subtitle_stream",),
+                    "streamID": ("streamId", "stream_id"),
+                    "streamTitle": ("stream_title",),
+                },
                 subtitleStream=subtitle_stream,
                 streamID=stream_id,
                 streamTitle=stream_title,
@@ -2596,7 +2728,12 @@ class PlexService:
     ) -> None:
         """Create an optimized version of a video item."""
         if hasattr(item, "optimize"):
-            item.optimize(
+            self._call_with_supported_kwargs(
+                item.optimize,
+                aliases={
+                    "deviceProfile": ("device_profile",),
+                    "videoQuality": ("video_quality",),
+                },
                 title=title,
                 target=target,
                 deviceProfile=device_profile,
@@ -2653,7 +2790,16 @@ class PlexService:
     ) -> None:
         """Invite a friend to share your Plex server."""
         target_server = server or self.ensure_server()
-        self._account.inviteFriend(
+        self._call_with_supported_kwargs(
+            self._account.inviteFriend,
+            aliases={
+                "allowSync": ("allow_sync",),
+                "allowCameraUpload": ("allow_camera_upload",),
+                "allowChannels": ("allow_channels",),
+                "filterMovies": ("filter_movies",),
+                "filterTelevision": ("filter_television",),
+                "filterMusic": ("filter_music",),
+            },
             user=user,
             server=target_server,
             sections=sections,
@@ -2684,7 +2830,17 @@ class PlexService:
     ) -> None:
         """Update sharing settings for a friend."""
         target_server = server or self.ensure_server()
-        self._account.updateFriend(
+        self._call_with_supported_kwargs(
+            self._account.updateFriend,
+            aliases={
+                "removeSections": ("remove_sections",),
+                "allowSync": ("allow_sync",),
+                "allowCameraUpload": ("allow_camera_upload",),
+                "allowChannels": ("allow_channels",),
+                "filterMovies": ("filter_movies",),
+                "filterTelevision": ("filter_television",),
+                "filterMusic": ("filter_music",),
+            },
             user=user,
             server=target_server,
             sections=sections,
@@ -2703,10 +2859,18 @@ class PlexService:
         include_received: bool = True,
     ) -> List[Any]:
         """Get pending friend invites."""
-        return list(self._account.pendingInvites(
-            includeSent=include_sent,
-            includeReceived=include_received,
-        ))
+        return list(
+            self._call_with_supported_kwargs(
+                self._account.pendingInvites,
+                aliases={
+                    "includeSent": ("include_sent",),
+                    "includeReceived": ("include_received",),
+                },
+                includeSent=include_sent,
+                includeReceived=include_received,
+            )
+            or []
+        )
 
     def accept_invite(self, user: str) -> None:
         """Accept a pending friend invite."""
@@ -2730,7 +2894,16 @@ class PlexService:
     ) -> None:
         """Create a managed home user."""
         target_server = server or self.ensure_server()
-        self._account.createHomeUser(
+        self._call_with_supported_kwargs(
+            self._account.createHomeUser,
+            aliases={
+                "allowSync": ("allow_sync",),
+                "allowCameraUpload": ("allow_camera_upload",),
+                "allowChannels": ("allow_channels",),
+                "filterMovies": ("filter_movies",),
+                "filterTelevision": ("filter_television",),
+                "filterMusic": ("filter_music",),
+            },
             user=user,
             server=target_server,
             sections=sections,
@@ -2748,12 +2921,18 @@ class PlexService:
 
     def switch_home_user(self, user: str, pin: Optional[str] = None) -> MyPlexAccount:
         """Switch to a different home user."""
-        return self._account.switchHomeUser(user, pin=pin)
+        return cast(
+            MyPlexAccount,
+            self._call_with_supported_kwargs(self._account.switchHomeUser, user, pin=pin),
+        )
 
     def switch_server_user(self, user: str, session: Optional[Any] = None, timeout: Optional[int] = None) -> PlexServer:
         """Switch user on the current server."""
         server = self.ensure_server()
-        return server.switchUser(user, session=session, timeout=timeout)
+        return cast(
+            PlexServer,
+            self._call_with_supported_kwargs(server.switchUser, user, session=session, timeout=timeout),
+        )
 
     # =========================================================================
     # SERVER ADMINISTRATION
@@ -2792,7 +2971,7 @@ class PlexService:
     def check_for_update(self, force: bool = True, download: bool = False) -> Any:
         """Check for Plex server updates."""
         server = self.ensure_server()
-        return server.checkForUpdate(force=force, download=download)
+        return self._call_with_supported_kwargs(server.checkForUpdate, force=force, download=download)
 
     def is_latest_version(self) -> bool:
         """Check if the server is running the latest version."""
@@ -2832,12 +3011,19 @@ class PlexService:
     def optimized_items(self, remove_all: Optional[bool] = None) -> List[Any]:
         """Get or manage optimized items."""
         server = self.ensure_server()
-        return list(server.optimizedItems(removeAll=remove_all))
+        return list(
+            self._call_with_supported_kwargs(
+                server.optimizedItems,
+                aliases={"removeAll": ("remove_all",)},
+                removeAll=remove_all,
+            )
+            or []
+        )
 
     def conversions(self, pause: Optional[bool] = None) -> List[Any]:
         """Get or manage conversion tasks."""
         server = self.ensure_server()
-        return list(server.conversions(pause=pause))
+        return list(self._call_with_supported_kwargs(server.conversions, pause=pause) or [])
 
     def current_background_process(self) -> Any:
         """Get the currently running background process."""
@@ -2858,13 +3044,22 @@ class PlexService:
     ) -> List[Any]:
         """Get watch history from the server."""
         server = self.ensure_server()
-        return list(server.history(
-            maxresults=maxresults,
-            mindate=mindate,
-            ratingKey=rating_key,
-            accountID=account_id,
-            librarySectionID=library_section_id,
-        ))
+        return list(
+            self._call_with_supported_kwargs(
+                server.history,
+                aliases={
+                    "ratingKey": ("rating_key",),
+                    "accountID": ("accountId", "account_id"),
+                    "librarySectionID": ("librarySectionId", "library_section_id"),
+                },
+                maxresults=maxresults,
+                mindate=mindate,
+                ratingKey=rating_key,
+                accountID=account_id,
+                librarySectionID=library_section_id,
+            )
+            or []
+        )
 
     def section_history(
         self,
@@ -2873,7 +3068,7 @@ class PlexService:
         mindate: Optional[Any] = None,
     ) -> List[Any]:
         """Get watch history for a specific library section."""
-        return list(section.history(maxresults=maxresults, mindate=mindate))
+        return list(self._call_with_supported_kwargs(section.history, maxresults=maxresults, mindate=mindate) or [])
 
     def account_history(
         self,
@@ -2881,7 +3076,7 @@ class PlexService:
         mindate: Optional[Any] = None,
     ) -> List[Any]:
         """Get watch history from the account (cross-server)."""
-        return list(self._account.history(maxresults=maxresults, mindate=mindate))
+        return list(self._call_with_supported_kwargs(self._account.history, maxresults=maxresults, mindate=mindate) or [])
 
     # =========================================================================
     # DOWNLOAD FEATURES
@@ -2896,11 +3091,19 @@ class PlexService:
     ) -> List[str]:
         """Download a media item."""
         if hasattr(item, "download"):
-            return list(item.download(
-                savepath=savepath,
-                keep_original_name=keep_original_name,
-                **kwargs,
-            ))
+            return list(
+                self._call_with_supported_kwargs(
+                    item.download,
+                    aliases={
+                        "savepath": ("savePath",),
+                        "keep_original_name": ("keepOriginalName",),
+                    },
+                    savepath=savepath,
+                    keep_original_name=keep_original_name,
+                    **kwargs,
+                )
+                or []
+            )
         raise NotImplementedError(f"Item type {type(item)} does not support download")
 
     def download_databases(
@@ -2910,7 +3113,15 @@ class PlexService:
     ) -> str:
         """Download server database backup."""
         server = self.ensure_server()
-        return server.downloadDatabases(savepath=savepath, unpack=unpack)
+        return cast(
+            str,
+            self._call_with_supported_kwargs(
+                server.downloadDatabases,
+                aliases={"savepath": ("savePath",)},
+                savepath=savepath,
+                unpack=unpack,
+            ),
+        )
 
     def download_logs(
         self,
@@ -2919,7 +3130,15 @@ class PlexService:
     ) -> str:
         """Download server logs."""
         server = self.ensure_server()
-        return server.downloadLogs(savepath=savepath, unpack=unpack)
+        return cast(
+            str,
+            self._call_with_supported_kwargs(
+                server.downloadLogs,
+                aliases={"savepath": ("savePath",)},
+                savepath=savepath,
+                unpack=unpack,
+            ),
+        )
 
     # =========================================================================
     # SYNC FEATURES
@@ -2927,7 +3146,15 @@ class PlexService:
 
     def sync_items(self, client: Optional[Any] = None, client_id: Optional[str] = None) -> List[Any]:
         """Get sync items for a client."""
-        return list(self._account.syncItems(client=client, clientId=client_id))
+        return list(
+            self._call_with_supported_kwargs(
+                self._account.syncItems,
+                aliases={"clientId": ("clientID", "client_id")},
+                client=client,
+                clientId=client_id,
+            )
+            or []
+        )
 
     def refresh_sync_list(self) -> None:
         """Refresh the sync list."""
@@ -2951,12 +3178,17 @@ class PlexService:
         providers: str = "discover",
     ) -> List[Any]:
         """Search Plex Discover for movies and shows."""
-        return list(self._account.searchDiscover(
-            query=query,
-            limit=limit,
-            libtype=libtype,
-            providers=providers,
-        ))
+        return list(
+            self._call_with_supported_kwargs(
+                self._account.searchDiscover,
+                aliases={"libtype": ("libType",)},
+                query=query,
+                limit=limit,
+                libtype=libtype,
+                providers=providers,
+            )
+            or []
+        )
 
     def video_on_demand(self) -> Any:
         """Get Plex video on demand content."""
@@ -2997,7 +3229,12 @@ class PlexService:
     ) -> Any:
         """Start a real-time alert listener for server events."""
         server = self.ensure_server()
-        return server.startAlertListener(callback=callback, callbackError=callback_error)
+        return self._call_with_supported_kwargs(
+            server.startAlertListener,
+            aliases={"callbackError": ("callback_error",)},
+            callback=callback,
+            callbackError=callback_error,
+        )
 
     # =========================================================================
     # ACCOUNT FEATURES
@@ -3009,7 +3246,7 @@ class PlexService:
         library: Optional[bool] = None,
     ) -> None:
         """Opt out of Plex data collection."""
-        self._account.optOut(playback=playback, library=library)
+        self._call_with_supported_kwargs(self._account.optOut, playback=playback, library=library)
 
     def claim_token(self) -> str:
         """Get a claim token for the account."""
@@ -3021,7 +3258,12 @@ class PlexService:
 
     def device(self, name: Optional[str] = None, client_id: Optional[str] = None) -> Any:
         """Get a specific device."""
-        return self._account.device(name=name, clientId=client_id)
+        return self._call_with_supported_kwargs(
+            self._account.device,
+            aliases={"clientId": ("clientID", "client_id")},
+            name=name,
+            clientId=client_id,
+        )
 
     # =========================================================================
     # CLIENTS
@@ -3044,7 +3286,7 @@ class PlexService:
     def bandwidth(self, timespan: Optional[str] = None, **kwargs: Any) -> List[Any]:
         """Get bandwidth statistics."""
         server = self.ensure_server()
-        return list(server.bandwidth(timespan=timespan, **kwargs))
+        return list(self._call_with_supported_kwargs(server.bandwidth, timespan=timespan, **kwargs) or [])
 
     # =========================================================================
     # WEB URL GENERATION
@@ -3054,8 +3296,8 @@ class PlexService:
         """Get the Plex Web URL for an item or the server."""
         server = self.ensure_server()
         if item and hasattr(item, "getWebURL"):
-            return item.getWebURL(base=base)
-        return server.getWebURL(base=base)
+            return cast(str, self._call_with_supported_kwargs(item.getWebURL, base=base))
+        return cast(str, self._call_with_supported_kwargs(server.getWebURL, base=base))
 
     # =========================================================================
     # UTILITY METHODS
@@ -3070,17 +3312,25 @@ class PlexService:
     ) -> str:
         """Get a transcoded image URL."""
         server = self.ensure_server()
-        return server.transcodeImage(image_url, height, width, **kwargs)
+        return cast(str, self._call_with_supported_kwargs(server.transcodeImage, image_url, height, width, **kwargs))
 
     def browse_server(self, path: Optional[str] = None, include_files: bool = True) -> List[Any]:
         """Browse the server filesystem."""
         server = self.ensure_server()
-        return list(server.browse(path=path, includeFiles=include_files))
+        return list(
+            self._call_with_supported_kwargs(
+                server.browse,
+                aliases={"includeFiles": ("include_files",)},
+                path=path,
+                includeFiles=include_files,
+            )
+            or []
+        )
 
     def walk_server(self, path: Optional[str] = None) -> Any:
         """Walk the server filesystem."""
         server = self.ensure_server()
-        return server.walk(path=path)
+        return self._call_with_supported_kwargs(server.walk, path=path)
 
     def is_browsable(self, path: str) -> bool:
         """Check if a path is browsable on the server."""

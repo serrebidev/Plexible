@@ -163,3 +163,23 @@ class TestMusicAlphaBucket:
         assert bucket.identifier == "artists_a"
         assert bucket.count == 42
         assert bucket.type == "alpha_bucket"
+
+
+class TestSearchCompatibility:
+    """Test PlexService search compatibility across plexapi versions."""
+
+    def test_search_supports_maxresults_alias(self, plex_service, mock_server, mock_plex_object):
+        """Map search(limit=...) to alternate search(maxresults=...) signatures."""
+        captured = {}
+
+        def search(query, *, maxresults=None):
+            captured["query"] = query
+            captured["maxresults"] = maxresults
+            return [mock_plex_object]
+
+        mock_server.search = search
+
+        results = plex_service.search("matrix", limit=7)
+
+        assert len(results) == 1
+        assert captured == {"query": "matrix", "maxresults": 7}
