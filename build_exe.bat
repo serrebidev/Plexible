@@ -47,8 +47,37 @@ set "DRY_RUN=1"
 goto :pipeline
 
 :pipeline
-set "ROOT_DIR=%~dp0"
+for %%I in ("%~f0") do set "ROOT_DIR=%%~dpI"
 pushd "%ROOT_DIR%" >nul
+if errorlevel 1 (
+    echo ERROR: Unable to change to script directory "%ROOT_DIR%".
+    exit /b 1
+)
+set "ROOT_DIR=%CD%"
+if not "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR%\"
+
+if not exist "%ROOT_DIR%main.py" (
+    echo ERROR: Refusing to run outside the repository root. Missing "%ROOT_DIR%main.py".
+    popd >nul
+    exit /b 1
+)
+if not exist "%ROOT_DIR%plexible.spec" (
+    echo ERROR: Refusing to run outside the repository root. Missing "%ROOT_DIR%plexible.spec".
+    popd >nul
+    exit /b 1
+)
+if not exist "%ROOT_DIR%.git\" if not exist "%ROOT_DIR%.git" (
+    echo ERROR: Refusing to run outside a git checkout. Missing "%ROOT_DIR%.git".
+    popd >nul
+    exit /b 1
+)
+
+set "BUILD_DIR=%ROOT_DIR%build"
+set "DIST_ROOT=%ROOT_DIR%dist"
+set "ARTIFACTS_DIR=%ROOT_DIR%release"
+set "SPEC_FILE=%ROOT_DIR%plexible.spec"
+set "VERSION_FILE=%ROOT_DIR%plex_client\version.py"
+set "RELEASE_TOOL=%ROOT_DIR%tools\release_tool.py"
 
 set "SIGNTOOL_DEFAULT=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
 if defined SIGNTOOL_PATH (
@@ -72,20 +101,26 @@ for /f "usebackq tokens=1,2 delims= " %%A in (`python -c "import re,subprocess; 
     set "REPO_NAME=%%B"
 )
 
-set "ARTIFACTS_DIR=release"
-
 if "%DRY_RUN%"=="1" (
-    echo [dry-run] Would clean build and dist folders.
+    echo [dry-run] Would clean "%BUILD_DIR%" and "%DIST_ROOT%".
 ) else (
-    if exist build rd /s /q build
-    if exist dist rd /s /q dist
+    call :safe_remove_dir "%BUILD_DIR%" "%ROOT_DIR%" "build"
+    if errorlevel 1 (
+        popd >nul
+        exit /b 1
+    )
+    call :safe_remove_dir "%DIST_ROOT%" "%ROOT_DIR%" "dist"
+    if errorlevel 1 (
+        popd >nul
+        exit /b 1
+    )
     if not exist "%ARTIFACTS_DIR%" mkdir "%ARTIFACTS_DIR%"
 )
 
 if "%DRY_RUN%"=="1" (
-    for /f "usebackq tokens=1,2 delims==" %%A in (`python tools\release_tool.py compute`) do set "%%A=%%B"
+    for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute`) do set "%%A=%%B"
 ) else (
-    for /f "usebackq tokens=1,2 delims==" %%A in (`python tools\release_tool.py compute --version-file "plex_client\version.py" --notes-file "%ARTIFACTS_DIR%\release_notes.md" --apply`) do set "%%A=%%B"
+    for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute --version-file "%VERSION_FILE%" --notes-file "%ARTIFACTS_DIR%\release_notes.md" --apply`) do set "%%A=%%B"
 )
 
 if "%NEXT_VERSION%"=="" (
@@ -96,18 +131,18 @@ if "%NEXT_VERSION%"=="" (
 
 set "ZIP_NAME=Plexible-v%NEXT_VERSION%.zip"
 set "ZIP_PATH=%ROOT_DIR%%ZIP_NAME%"
-set "ZIP_LATEST=Plexible.zip"
-set "DIST_DIR=dist\Plexible"
+set "ZIP_LATEST=%ROOT_DIR%Plexible.zip"
+set "DIST_DIR=%DIST_ROOT%\Plexible"
 set "NOTES_FILE=%ARTIFACTS_DIR%\release_notes.md"
 set "MANIFEST_FILE=%ARTIFACTS_DIR%\Plexible-update.json"
 set "DOWNLOAD_URL=https://github.com/%REPO_OWNER%/%REPO_NAME%/releases/download/v%NEXT_VERSION%/%ZIP_NAME%"
 if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
 
 if "%DRY_RUN%"=="1" (
-    echo [dry-run] pyinstaller --noconfirm plexible.spec
+    echo [dry-run] pyinstaller --noconfirm "%SPEC_FILE%"
 ) else (
     echo Running PyInstaller...
-    pyinstaller --noconfirm plexible.spec
+    pyinstaller --noconfirm "%SPEC_FILE%"
     if errorlevel 1 (
         echo Build failed!
         popd >nul
@@ -196,9 +231,9 @@ if "%DRY_RUN%"=="1" (
         exit /b 1
     )
     if "%SIGNING_THUMBPRINT%"=="" (
-        python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
+        python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
     ) else (
-        python tools\release_tool.py manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
+        python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
     )
 )
 
@@ -264,4 +299,38 @@ if errorlevel 1 (
 echo.
 echo Release v%NEXT_VERSION% created successfully.
 popd >nul
+exit /b 0
+
+:safe_remove_dir
+set "SAFE_TARGET=%~f1"
+set "SAFE_ROOT=%~f2"
+set "SAFE_EXPECTED_NAME=%~3"
+if not defined SAFE_TARGET (
+    echo ERROR: Refusing to remove an empty path.
+    exit /b 1
+)
+if not defined SAFE_ROOT (
+    echo ERROR: Refusing to remove "%SAFE_TARGET%" without a known root directory.
+    exit /b 1
+)
+for %%I in ("%SAFE_TARGET%") do (
+    set "SAFE_TARGET=%%~fI"
+    set "SAFE_TARGET_PARENT=%%~dpI"
+    set "SAFE_TARGET_NAME=%%~nxI"
+)
+for %%I in ("%SAFE_ROOT%") do set "SAFE_ROOT=%%~fI"
+if not "%SAFE_ROOT:~-1%"=="\" set "SAFE_ROOT=%SAFE_ROOT%\"
+if /i "%SAFE_TARGET%"=="%SAFE_ROOT%" (
+    echo ERROR: Refusing to remove repository root "%SAFE_TARGET%".
+    exit /b 1
+)
+if /i not "!SAFE_TARGET_PARENT!"=="%SAFE_ROOT%" (
+    echo ERROR: Refusing to remove "!SAFE_TARGET!" because parent is "!SAFE_TARGET_PARENT!" (expected "%SAFE_ROOT%").
+    exit /b 1
+)
+if /i not "!SAFE_TARGET_NAME!"=="%SAFE_EXPECTED_NAME%" (
+    echo ERROR: Refusing to remove "!SAFE_TARGET!" because name is "!SAFE_TARGET_NAME!" (expected "%SAFE_EXPECTED_NAME%").
+    exit /b 1
+)
+if exist "!SAFE_TARGET!\" rd /s /q "!SAFE_TARGET!"
 exit /b 0
