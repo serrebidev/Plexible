@@ -17,6 +17,21 @@ class TestCollectionFeatures:
         assert len(collections) == 1
         assert collections[0] == mock_collection
 
+    def test_collections_filters_unsupported_kwargs(self, plex_service, mock_library_section, mock_collection):
+        """Drop unsupported kwargs when collection list signatures vary."""
+        captured = {}
+
+        def collections(*, title=None):
+            captured["title"] = title
+            return [mock_collection]
+
+        mock_library_section.collections = collections
+
+        result = plex_service.collections(mock_library_section, title="Sci-Fi", sort="titleSort:asc")
+
+        assert len(result) == 1
+        assert captured == {"title": "Sci-Fi"}
+
     def test_get_collection_by_title(self, plex_service, mock_library_section, mock_collection):
         """Test getting a specific collection by title."""
         mock_library_section.collection.return_value = mock_collection
@@ -90,6 +105,21 @@ class TestCollectionFeatures:
         plex_service.collection_move_item(mock_collection, mock_plex_object, after=after_item)
         
         mock_collection.moveItem.assert_called_once_with(mock_plex_object, after=after_item)
+
+    def test_collection_move_item_supports_after_item_alias(self, plex_service, mock_collection, mock_plex_object):
+        """Map moveItem(after=...) to alternate afterItem signatures."""
+        after_item = MagicMock()
+        captured = {}
+
+        def move_item(item, *, afterItem=None):
+            captured["item"] = item
+            captured["afterItem"] = afterItem
+
+        mock_collection.moveItem = move_item
+
+        plex_service.collection_move_item(mock_collection, mock_plex_object, after=after_item)
+
+        assert captured == {"item": mock_plex_object, "afterItem": after_item}
 
     def test_collection_delete(self, plex_service, mock_collection):
         """Test deleting a collection."""

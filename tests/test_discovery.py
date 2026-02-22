@@ -38,6 +38,40 @@ class TestHistory:
             librarySectionID=1,
         )
 
+    def test_history_supports_snake_case_aliases(self, plex_service, mock_server, mock_video):
+        """Map history camelCase kwargs to snake_case variants."""
+        from datetime import datetime
+
+        captured = {}
+        mindate = datetime(2024, 1, 1)
+
+        def history(*, maxresults=None, mindate=None, rating_key=None, accountId=None, librarySectionId=None):
+            captured["maxresults"] = maxresults
+            captured["mindate"] = mindate
+            captured["rating_key"] = rating_key
+            captured["accountId"] = accountId
+            captured["librarySectionId"] = librarySectionId
+            return [mock_video]
+
+        mock_server.history = history
+
+        results = plex_service.history(
+            maxresults=25,
+            mindate=mindate,
+            rating_key=99,
+            account_id=2,
+            library_section_id=3,
+        )
+
+        assert len(results) == 1
+        assert captured == {
+            "maxresults": 25,
+            "mindate": mindate,
+            "rating_key": 99,
+            "accountId": 2,
+            "librarySectionId": 3,
+        }
+
     def test_section_history(self, plex_service, mock_library_section, mock_video):
         """Test getting section history."""
         mock_library_section.history.return_value = [mock_video]
@@ -86,6 +120,22 @@ class TestDiscovery:
             libtype="movie",
             providers="discover",
         )
+
+    def test_search_discover_supports_lib_type_alias_and_filters_providers(self, plex_service, mock_account):
+        """Map libtype to libType and drop providers if unsupported."""
+        captured = {}
+
+        def search_discover(*, query=None, limit=None, libType=None):
+            captured["query"] = query
+            captured["limit"] = limit
+            captured["libType"] = libType
+            return []
+
+        mock_account.searchDiscover = search_discover
+
+        plex_service.search_discover("comedy", limit=12, libtype="movie", providers="discover")
+
+        assert captured == {"query": "comedy", "limit": 12, "libType": "movie"}
 
     def test_video_on_demand(self, plex_service, mock_account):
         """Test getting VOD content."""
@@ -163,6 +213,24 @@ class TestAlertListener:
             callbackError=error_callback,
         )
 
+    def test_start_alert_listener_supports_callback_error_alias(self, plex_service, mock_server):
+        """Map callbackError to callback_error for alternate alert listener signatures."""
+        callback = MagicMock()
+        error_callback = MagicMock()
+        captured = {}
+
+        def start_alert_listener(*, callback=None, callback_error=None):
+            captured["callback"] = callback
+            captured["callback_error"] = callback_error
+            return "listener"
+
+        mock_server.startAlertListener = start_alert_listener
+
+        result = plex_service.start_alert_listener(callback=callback, callback_error=error_callback)
+
+        assert result == "listener"
+        assert captured == {"callback": callback, "callback_error": error_callback}
+
 
 class TestSyncFeatures:
     """Test sync functionality."""
@@ -182,6 +250,21 @@ class TestSyncFeatures:
         plex_service.sync_items(client_id="client123")
         
         mock_account.syncItems.assert_called_once_with(client=None, clientId="client123")
+
+    def test_sync_items_supports_client_id_alias(self, plex_service, mock_account):
+        """Map clientId to clientID for alternate syncItems signatures."""
+        captured = {}
+
+        def sync_items(*, client=None, clientID=None):
+            captured["client"] = client
+            captured["clientID"] = clientID
+            return []
+
+        mock_account.syncItems = sync_items
+
+        plex_service.sync_items(client_id="client-abc")
+
+        assert captured == {"client": None, "clientID": "client-abc"}
 
     def test_refresh_sync_list(self, plex_service, mock_server):
         """Test refreshing sync list."""
@@ -269,6 +352,23 @@ class TestUtilities:
         
         assert len(results) == 1
         mock_server.browse.assert_called_once_with(path="/media", includeFiles=True)
+
+    def test_browse_server_supports_include_files_alias(self, plex_service, mock_server):
+        """Map includeFiles to include_files for alternate browse signatures."""
+        captured = {}
+        folder = MagicMock()
+
+        def browse(*, path=None, include_files=None):
+            captured["path"] = path
+            captured["include_files"] = include_files
+            return [folder]
+
+        mock_server.browse = browse
+
+        result = plex_service.browse_server(path="/media", include_files=False)
+
+        assert len(result) == 1
+        assert captured == {"path": "/media", "include_files": False}
 
     def test_is_browsable(self, plex_service, mock_server):
         """Test checking if path is browsable."""

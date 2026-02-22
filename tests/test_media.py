@@ -91,6 +91,22 @@ class TestSubtitleManagement:
             forced=1,
         )
 
+    def test_search_subtitles_supports_snake_case_hearing_impaired(self, plex_service, mock_video):
+        """Map hearingImpaired to hearing_impaired when signatures differ."""
+        captured = {}
+
+        def search_subtitles(*, language=None, hearing_impaired=None, forced=None):
+            captured["language"] = language
+            captured["hearing_impaired"] = hearing_impaired
+            captured["forced"] = forced
+            return []
+
+        mock_video.searchSubtitles = search_subtitles
+
+        plex_service.search_subtitles(mock_video, language="fr", hearing_impaired=1, forced=0)
+
+        assert captured == {"language": "fr", "hearing_impaired": 1, "forced": 0}
+
     def test_download_subtitles(self, plex_service, mock_video):
         """Test downloading subtitles."""
         subtitle_stream = MagicMock()
@@ -121,6 +137,31 @@ class TestSubtitleManagement:
             streamTitle=None,
         )
 
+    def test_remove_subtitles_supports_snake_case_aliases(self, plex_service, mock_video):
+        """Map removeSubtitles camelCase kwargs to snake_case variants."""
+        subtitle_stream = MagicMock()
+        captured = {}
+
+        def remove_subtitles(*, subtitle_stream=None, stream_id=None, stream_title=None):
+            captured["subtitle_stream"] = subtitle_stream
+            captured["stream_id"] = stream_id
+            captured["stream_title"] = stream_title
+
+        mock_video.removeSubtitles = remove_subtitles
+
+        plex_service.remove_subtitles(
+            mock_video,
+            subtitle_stream=subtitle_stream,
+            stream_id=7,
+            stream_title="English SDH",
+        )
+
+        assert captured == {
+            "subtitle_stream": subtitle_stream,
+            "stream_id": 7,
+            "stream_title": "English SDH",
+        }
+
 
 class TestOptimization:
     """Test media optimization functionality."""
@@ -135,6 +176,33 @@ class TestOptimization:
         )
         
         mock_video.optimize.assert_called_once()
+
+    def test_optimize_item_supports_snake_case_aliases(self, plex_service, mock_video):
+        """Map optimize camelCase kwargs to snake_case variants."""
+        captured = {}
+
+        def optimize(*, title=None, target=None, device_profile=None, video_quality=None):
+            captured["title"] = title
+            captured["target"] = target
+            captured["device_profile"] = device_profile
+            captured["video_quality"] = video_quality
+
+        mock_video.optimize = optimize
+
+        plex_service.optimize_item(
+            mock_video,
+            title="Tablet",
+            target="mobile",
+            device_profile="android",
+            video_quality=6,
+        )
+
+        assert captured == {
+            "title": "Tablet",
+            "target": "mobile",
+            "device_profile": "android",
+            "video_quality": 6,
+        }
 
     def test_optimize_item_not_supported(self, plex_service):
         """Test optimizing item that doesn't support it."""
@@ -153,6 +221,22 @@ class TestDownload:
         
         assert "/path/to/file.mp4" in result
         mock_video.download.assert_called_once()
+
+    def test_download_item_supports_camel_case_keep_original_name(self, plex_service, mock_video):
+        """Map download keep_original_name to keepOriginalName signatures."""
+        captured = {}
+
+        def download(*, savePath=None, keepOriginalName=None):
+            captured["savePath"] = savePath
+            captured["keepOriginalName"] = keepOriginalName
+            return ["/tmp/test.mp4"]
+
+        mock_video.download = download
+
+        result = plex_service.download_item(mock_video, savepath="/downloads", keep_original_name=True)
+
+        assert result == ["/tmp/test.mp4"]
+        assert captured == {"savePath": "/downloads", "keepOriginalName": True}
 
     def test_download_item_not_supported(self, plex_service):
         """Test downloading item that doesn't support it."""

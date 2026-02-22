@@ -25,13 +25,39 @@ class TestPlaylistFeatures:
             title="Test",
             sort="lastViewedAt",
         )
-        
+
         mock_server.playlists.assert_called_once_with(
             playlistType="audio",
             sectionId=1,
             title="Test",
             sort="lastViewedAt",
         )
+
+    def test_playlists_supports_section_id_alias_and_filters_unknown_kwargs(self, plex_service, mock_server, mock_playlist):
+        """Map sectionId to sectionID and drop unsupported kwargs for older signatures."""
+        captured = {}
+
+        def playlists(*, playlistType=None, sectionID=None, title=None):
+            captured["playlistType"] = playlistType
+            captured["sectionID"] = sectionID
+            captured["title"] = title
+            return [mock_playlist]
+
+        mock_server.playlists = playlists
+
+        result = plex_service.playlists(
+            playlist_type="audio",
+            section_id=5,
+            title="Road Trip",
+            sort="lastViewedAt",
+        )
+
+        assert len(result) == 1
+        assert captured == {
+            "playlistType": "audio",
+            "sectionID": 5,
+            "title": "Road Trip",
+        }
 
     def test_get_playlist_by_title(self, plex_service, mock_server, mock_playlist):
         """Test getting a specific playlist by title."""
@@ -104,6 +130,21 @@ class TestPlaylistFeatures:
         plex_service.playlist_move_item(mock_playlist, mock_plex_object, after=after_item)
         
         mock_playlist.moveItem.assert_called_once_with(mock_plex_object, after=after_item)
+
+    def test_playlist_move_item_supports_after_item_alias(self, plex_service, mock_playlist, mock_plex_object):
+        """Map moveItem(after=...) to older/newer afterItem signatures."""
+        after_item = MagicMock()
+        captured = {}
+
+        def move_item(item, *, afterItem=None):
+            captured["item"] = item
+            captured["afterItem"] = afterItem
+
+        mock_playlist.moveItem = move_item
+
+        plex_service.playlist_move_item(mock_playlist, mock_plex_object, after=after_item)
+
+        assert captured == {"item": mock_plex_object, "afterItem": after_item}
 
     def test_playlist_delete(self, plex_service, mock_playlist):
         """Test deleting a playlist."""

@@ -47,6 +47,35 @@ class TestUserManagement:
         
         mock_account.inviteFriend.assert_called_once()
 
+    def test_invite_friend_supports_snake_case_sharing_kwargs(self, plex_service, mock_account, mock_server, mock_library_section):
+        """Map inviteFriend camelCase sharing kwargs to snake_case variants."""
+        captured = {}
+
+        def invite_friend(*, user=None, server=None, sections=None, allow_sync=None, filter_movies=None):
+            captured["user"] = user
+            captured["server"] = server
+            captured["sections"] = sections
+            captured["allow_sync"] = allow_sync
+            captured["filter_movies"] = filter_movies
+
+        mock_account.inviteFriend = invite_friend
+
+        plex_service.invite_friend(
+            user="friend@example.com",
+            server=mock_server,
+            sections=[mock_library_section],
+            allow_sync=True,
+            filter_movies={"contentRating": "PG-13"},
+        )
+
+        assert captured == {
+            "user": "friend@example.com",
+            "server": mock_server,
+            "sections": [mock_library_section],
+            "allow_sync": True,
+            "filter_movies": {"contentRating": "PG-13"},
+        }
+
     def test_remove_friend(self, plex_service, mock_account):
         """Test removing a friend."""
         plex_service.remove_friend("friend@example.com")
@@ -62,6 +91,20 @@ class TestUserManagement:
         )
         
         mock_account.updateFriend.assert_called_once()
+
+    def test_update_friend_supports_remove_sections_alias(self, plex_service, mock_account):
+        """Map removeSections to remove_sections for alternate updateFriend signatures."""
+        captured = {}
+
+        def update_friend(*, user=None, remove_sections=None):
+            captured["user"] = user
+            captured["remove_sections"] = remove_sections
+
+        mock_account.updateFriend = update_friend
+
+        plex_service.update_friend(user="friend@example.com", remove_sections=True)
+
+        assert captured == {"user": "friend@example.com", "remove_sections": True}
 
     def test_pending_invites(self, plex_service, mock_account):
         """Test getting pending invites."""
@@ -110,6 +153,29 @@ class TestHomeUserManagement:
         )
         
         mock_account.createHomeUser.assert_called_once()
+
+    def test_create_home_user_supports_snake_case_aliases(self, plex_service, mock_account, mock_server):
+        """Map createHomeUser camelCase kwargs to snake_case variants."""
+        captured = {}
+
+        def create_home_user(*, user=None, server=None, allow_camera_upload=None):
+            captured["user"] = user
+            captured["server"] = server
+            captured["allow_camera_upload"] = allow_camera_upload
+
+        mock_account.createHomeUser = create_home_user
+
+        plex_service.create_home_user(
+            user="Kid",
+            server=mock_server,
+            allow_camera_upload=True,
+        )
+
+        assert captured == {
+            "user": "Kid",
+            "server": mock_server,
+            "allow_camera_upload": True,
+        }
 
     def test_remove_home_user(self, plex_service, mock_account):
         """Test removing a home user."""
