@@ -54,6 +54,19 @@ class TestCollectionFeatures:
         
         assert result == mock_collection
 
+    def test_create_collection_passes_libtype(self, plex_service, mock_server, mock_collection, mock_library_section):
+        """Test collection creation forwards libtype when supported by the API."""
+        mock_server.createCollection.return_value = mock_collection
+
+        plex_service.create_collection(
+            title="Sci-Fi",
+            section=mock_library_section,
+            smart=True,
+            libtype="movie",
+        )
+
+        assert mock_server.createCollection.call_args.kwargs["libtype"] == "movie"
+
     def test_collection_add_items(self, plex_service, mock_collection, mock_plex_object):
         """Test adding items to a collection."""
         items = [mock_plex_object]
