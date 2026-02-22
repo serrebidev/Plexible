@@ -55,6 +55,7 @@ if errorlevel 1 (
 )
 set "ROOT_DIR=%CD%"
 if not "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR%\"
+set "ROOT_DIR_NOSLASH=%ROOT_DIR:~0,-1%"
 
 if not exist "%ROOT_DIR%main.py" (
     echo ERROR: Refusing to run outside the repository root. Missing "%ROOT_DIR%main.py".
@@ -104,12 +105,12 @@ for /f "usebackq tokens=1,2 delims= " %%A in (`python -c "import re,subprocess; 
 if "%DRY_RUN%"=="1" (
     echo [dry-run] Would clean "%BUILD_DIR%" and "%DIST_ROOT%".
 ) else (
-    call :safe_remove_dir "%BUILD_DIR%" "%ROOT_DIR%" "build"
+    call :safe_remove_dir "%BUILD_DIR%" "%ROOT_DIR_NOSLASH%" "build"
     if errorlevel 1 (
         popd >nul
         exit /b 1
     )
-    call :safe_remove_dir "%DIST_ROOT%" "%ROOT_DIR%" "dist"
+    call :safe_remove_dir "%DIST_ROOT%" "%ROOT_DIR_NOSLASH%" "dist"
     if errorlevel 1 (
         popd >nul
         exit /b 1
