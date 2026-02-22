@@ -1,7 +1,10 @@
 import argparse
+import hashlib
 import json
 import re
 import subprocess
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -161,6 +164,82 @@ def _manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _repo_origin(args: argparse.Namespace) -> int:
+    owner = "serrebi"
+    name = "Plexible"
+    try:
+        url = _run_git("remote", "get-url", "origin")
+    except Exception:
+        url = ""
+    match = re.search(r"github\.com[:/](.+?)/([^/.]+)", url)
+    if match:
+        owner = match.group(1)
+        name = match.group(2)
+    print(f"REPO_OWNER={owner}")
+    print(f"REPO_NAME={name}")
+    return 0
+
+
+def _zipdir(args: argparse.Namespace) -> int:
+    root = Path(args.input_dir).resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"Input directory not found: {root}")
+    zip_path = Path(args.output).resolve()
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    if zip_path.exists():
+        zip_path.unlink()
+    base = root.parent
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file_path in root.rglob("*"):
+            if file_path.is_file():
+                archive.write(file_path, file_path.relative_to(base))
+    return 0
+
+
+def _sha256(args: argparse.Namespace) -> int:
+    digest = hashlib.sha256()
+    with Path(args.input).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    if args.output:
+        Path(args.output).write_text(value + "\n", encoding="utf-8")
+    else:
+        print(value)
+    return 0
+
+
+def _utcnow(args: argparse.Namespace) -> int:
+    value = datetime.now(timezone.utc).isoformat()
+    if args.output:
+        Path(args.output).write_text(value + "\n", encoding="utf-8")
+    else:
+        print(value)
+    return 0
+
+
+def _signing_thumbprint(args: argparse.Namespace) -> int:
+    exe_path = str(Path(args.exe).resolve())
+    exe_literal = exe_path.replace("'", "''")
+    # Run PowerShell from Python to avoid cmd.exe block parser issues in batch scripts.
+    command = (
+        f"$sig = Get-AuthenticodeSignature -LiteralPath '{exe_literal}'; "
+        "if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint }"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    thumbprint = (result.stdout or "").strip()
+    if args.output:
+        Path(args.output).write_text((thumbprint + "\n") if thumbprint else "", encoding="utf-8")
+    elif thumbprint:
+        print(thumbprint)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Release helper for Plexible.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -181,6 +260,28 @@ def main() -> int:
     manifest_parser.add_argument("--signing-thumbprint")
     manifest_parser.add_argument("--output", required=True)
     manifest_parser.set_defaults(func=_manifest)
+
+    repo_origin_parser = subparsers.add_parser("repo-origin")
+    repo_origin_parser.set_defaults(func=_repo_origin)
+
+    zipdir_parser = subparsers.add_parser("zipdir")
+    zipdir_parser.add_argument("--input-dir", required=True)
+    zipdir_parser.add_argument("--output", required=True)
+    zipdir_parser.set_defaults(func=_zipdir)
+
+    sha256_parser = subparsers.add_parser("sha256")
+    sha256_parser.add_argument("--input", required=True)
+    sha256_parser.add_argument("--output")
+    sha256_parser.set_defaults(func=_sha256)
+
+    utcnow_parser = subparsers.add_parser("utcnow")
+    utcnow_parser.add_argument("--output")
+    utcnow_parser.set_defaults(func=_utcnow)
+
+    thumbprint_parser = subparsers.add_parser("signing-thumbprint")
+    thumbprint_parser.add_argument("--exe", required=True)
+    thumbprint_parser.add_argument("--output")
+    thumbprint_parser.set_defaults(func=_signing_thumbprint)
 
     args = parser.parse_args()
     return args.func(args)
