@@ -69,6 +69,18 @@ class TestPlaylistFeatures:
         
         assert result == mock_playlist
 
+    def test_create_playlist_passes_libtype(self, plex_service, mock_server, mock_playlist):
+        """Test playlist creation forwards libtype when supported by the API."""
+        mock_server.createPlaylist.return_value = mock_playlist
+
+        plex_service.create_playlist(
+            title="Movie Picks",
+            smart=True,
+            libtype="movie",
+        )
+
+        assert mock_server.createPlaylist.call_args.kwargs["libtype"] == "movie"
+
     def test_playlist_add_items(self, plex_service, mock_playlist, mock_plex_object):
         """Test adding items to a playlist."""
         items = [mock_plex_object]

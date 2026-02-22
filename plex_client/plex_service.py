@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+import inspect
 import threading
 import time
 import random
@@ -209,6 +210,43 @@ class PlexService:
     def server(self) -> Optional[PlexServer]:
         return self._server
 
+    @staticmethod
+    def _call_with_supported_kwargs(
+        func: Callable[..., Any],
+        *args: Any,
+        aliases: Optional[Dict[str, Sequence[str]]] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Call a plexapi method while filtering/renaming unsupported kwargs."""
+        aliases = aliases or {}
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return func(*args, **kwargs)
+
+        parameters = signature.parameters
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+            return func(*args, **kwargs)
+
+        allowed = {
+            name
+            for name, param in parameters.items()
+            if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        filtered_kwargs: Dict[str, Any] = {}
+        for key, value in kwargs.items():
+            if key in allowed:
+                filtered_kwargs[key] = value
+                continue
+            for alias in aliases.get(key, ()):
+                if alias in allowed and alias not in filtered_kwargs:
+                    filtered_kwargs[alias] = value
+                    break
+        return func(*args, **filtered_kwargs)
+
+    def _create_play_queue(self, server: PlexServer, items: Any, **kwargs: Any) -> PlayQueue:
+        return cast(PlayQueue, self._call_with_supported_kwargs(PlayQueue.create, server, items, **kwargs))
+
     def refresh_servers(self) -> List[MyPlexResource]:
         self._resources = [
             resource
@@ -327,7 +365,7 @@ class PlexService:
         last_exc: Optional[Exception] = None
         for label, kwargs in attempts:
             try:
-                server = resource.connect(**kwargs)
+                server = self._call_with_supported_kwargs(resource.connect, **kwargs)
                 print(f"[PlexService] Connected to {name} via {label} strategy.")
                 return server
             except Exception as exc:
@@ -1135,7 +1173,7 @@ class PlexService:
             raise RuntimeError("Unable to find music to start this radio.")
         seed = self._ensure_item_loaded(seed)
         server = self.ensure_server()
-        queue = PlayQueue.create(
+        queue = self._create_play_queue(
             server,
             [seed],
             shuffle=1,
@@ -1278,7 +1316,7 @@ class PlexService:
         library_section_id: Optional[str] = None,
     ) -> tuple[PlayableMedia, RadioSession]:
         server = self.ensure_server()
-        queue = PlayQueue.create(
+        queue = self._create_play_queue(
             server,
             seed,
             shuffle=1,
@@ -1456,7 +1494,7 @@ class PlexService:
 
     def start_playlist(self, playlist: PlexObject) -> tuple[PlayableMedia, RadioSession]:
         server = self.ensure_server()
-        queue = PlayQueue.create(server, playlist, shuffle=0, continuous=0)
+        queue = self._create_play_queue(server, playlist, shuffle=0, continuous=0)
         section_id = self._normalize_section_id(getattr(playlist, "librarySectionID", None))
         description = getattr(playlist, "title", None) or "Playlist"
         return self._initialize_radio_session(
@@ -2232,21 +2270,27 @@ class PlexService:
         items: Optional[List[PlexObject]] = None,
         smart: bool = False,
         limit: Optional[int] = None,
+        libtype: Optional[str] = None,
         sort: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Playlist:
         """Create a new playlist on the server."""
         server = self.ensure_server()
-        return server.createPlaylist(
-            title=title,
-            section=section,
-            items=items,
-            smart=smart,
-            limit=limit,
-            sort=sort,
-            filters=filters,
-            **kwargs,
+        return cast(
+            Playlist,
+            self._call_with_supported_kwargs(
+                server.createPlaylist,
+                title=title,
+                section=section,
+                items=items,
+                smart=smart,
+                limit=limit,
+                libtype=libtype,
+                sort=sort,
+                filters=filters,
+                **kwargs,
+            ),
         )
 
     def playlist_add_items(self, playlist: Playlist, items: List[PlexObject]) -> None:
@@ -2297,21 +2341,27 @@ class PlexService:
         items: Optional[List[PlexObject]] = None,
         smart: bool = False,
         limit: Optional[int] = None,
+        libtype: Optional[str] = None,
         sort: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Collection:
         """Create a new collection in a library section."""
         server = self.ensure_server()
-        return server.createCollection(
-            title=title,
-            section=section,
-            items=items,
-            smart=smart,
-            limit=limit,
-            sort=sort,
-            filters=filters,
-            **kwargs,
+        return cast(
+            Collection,
+            self._call_with_supported_kwargs(
+                server.createCollection,
+                title=title,
+                section=section,
+                items=items,
+                smart=smart,
+                limit=limit,
+                libtype=libtype,
+                sort=sort,
+                filters=filters,
+                **kwargs,
+            ),
         )
 
     def collection_add_items(self, collection: Collection, items: List[PlexObject]) -> None:
@@ -2405,8 +2455,13 @@ class PlexService:
         """Get recently added items from a library section or all libraries."""
         server = self.ensure_server()
         if section:
-            return list(section.recentlyAdded(maxresults=maxresults, libtype=libtype))
-        return list(server.library.recentlyAdded())
+            recent = self._call_with_supported_kwargs(section.recentlyAdded, maxresults=maxresults, libtype=libtype)
+            return list(recent or [])
+        recent = getattr(server.library, "recentlyAdded", None)
+        if not callable(recent):
+            return []
+        items = self._call_with_supported_kwargs(recent, maxresults=maxresults, libtype=libtype)
+        return list(items or [])
 
     def library_on_deck(self, section: Optional[LibrarySection] = None) -> List[PlexObject]:
         """Get on-deck items from a library section or all libraries."""
@@ -2419,8 +2474,16 @@ class PlexService:
         """Get continue watching items from a library section or server."""
         server = self.ensure_server()
         if section:
-            return list(section.continueWatching())
-        return list(server.continueWatching())
+            getter = getattr(section, "continueWatching", None)
+            if callable(getter):
+                return list(getter())
+            fallback = getattr(section, "onDeck", None)
+            return list(fallback() or []) if callable(fallback) else []
+        getter = getattr(server, "continueWatching", None)
+        if callable(getter):
+            return list(getter())
+        fallback = getattr(server.library, "onDeck", None)
+        return list(fallback() or []) if callable(fallback) else []
 
     def library_hubs(
         self,
@@ -2431,8 +2494,24 @@ class PlexService:
         """Get content hubs for discovery."""
         server = self.ensure_server()
         if section:
-            return list(section.hubs())
-        return list(server.library.hubs(sectionID=section_id, identifier=identifier))
+            hubs_getter = getattr(section, "hubs", None)
+            if callable(hubs_getter):
+                return list(hubs_getter())
+            derived_section_id = self._normalize_section_id(
+                getattr(section, "librarySectionID", None) or getattr(section, "key", None)
+            )
+            if section_id is None and derived_section_id and derived_section_id.isdigit():
+                section_id = int(derived_section_id)
+        hubs_getter = getattr(server.library, "hubs", None)
+        if not callable(hubs_getter):
+            return []
+        hubs = self._call_with_supported_kwargs(
+            hubs_getter,
+            aliases={"sectionID": ("sectionId",), "sectionId": ("sectionID",)},
+            sectionID=section_id,
+            identifier=identifier,
+        )
+        return list(hubs or [])
 
     # =========================================================================
     # MEDIA MANAGEMENT

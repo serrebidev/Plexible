@@ -114,6 +114,22 @@ class TestLibraryDiscovery:
         assert len(items) == 1
         mock_server.library.recentlyAdded.assert_called_once()
 
+    def test_library_recently_added_all_forwards_supported_kwargs(self, plex_service, mock_server, mock_plex_object):
+        """Test server-wide recently added forwards kwargs when the API supports them."""
+        captured = {}
+
+        def recently_added(*, maxresults=None, libtype=None):
+            captured["maxresults"] = maxresults
+            captured["libtype"] = libtype
+            return [mock_plex_object]
+
+        mock_server.library.recentlyAdded = recently_added
+
+        items = plex_service.library_recently_added(maxresults=10, libtype="movie")
+
+        assert len(items) == 1
+        assert captured == {"maxresults": 10, "libtype": "movie"}
+
     def test_library_recently_added_section(self, plex_service, mock_library_section, mock_plex_object):
         """Test getting recently added from a section."""
         mock_library_section.recentlyAdded.return_value = [mock_plex_object]
@@ -150,6 +166,16 @@ class TestLibraryDiscovery:
         assert len(items) == 1
         mock_server.continueWatching.assert_called_once()
 
+    def test_library_continue_watching_server_falls_back_to_on_deck(self, plex_service, mock_server, mock_video):
+        """Test continue watching falls back to onDeck when unavailable on server."""
+        mock_server.continueWatching = None
+        mock_server.library.onDeck.return_value = [mock_video]
+
+        items = plex_service.library_continue_watching()
+
+        assert len(items) == 1
+        mock_server.library.onDeck.assert_called_once()
+
     def test_library_continue_watching_section(self, plex_service, mock_library_section, mock_video):
         """Test getting continue watching from a section."""
         mock_library_section.continueWatching.return_value = [mock_video]
@@ -158,6 +184,16 @@ class TestLibraryDiscovery:
         
         assert len(items) == 1
         mock_library_section.continueWatching.assert_called_once()
+
+    def test_library_continue_watching_section_falls_back_to_on_deck(self, plex_service, mock_library_section, mock_video):
+        """Test section continue watching falls back to onDeck when unavailable."""
+        mock_library_section.continueWatching = None
+        mock_library_section.onDeck.return_value = [mock_video]
+
+        items = plex_service.library_continue_watching(section=mock_library_section)
+
+        assert len(items) == 1
+        mock_library_section.onDeck.assert_called_once()
 
     def test_library_hubs_server(self, plex_service, mock_server):
         """Test getting hubs from server."""
@@ -169,6 +205,24 @@ class TestLibraryDiscovery:
         
         assert len(hubs) == 1
         mock_server.library.hubs.assert_called_once()
+
+    def test_library_hubs_server_supports_section_id_alias(self, plex_service, mock_server):
+        """Test hubs call maps sectionID -> sectionId for alternate API signatures."""
+        hub = MagicMock()
+        hub.title = "Continue Watching"
+        captured = {}
+
+        def hubs(*, sectionId=None, identifier=None):
+            captured["sectionId"] = sectionId
+            captured["identifier"] = identifier
+            return [hub]
+
+        mock_server.library.hubs = hubs
+
+        result = plex_service.library_hubs(section_id=5, identifier="cw")
+
+        assert len(result) == 1
+        assert captured == {"sectionId": 5, "identifier": "cw"}
 
     def test_library_hubs_section(self, plex_service, mock_library_section):
         """Test getting hubs from a section."""
