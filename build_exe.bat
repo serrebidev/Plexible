@@ -210,70 +210,22 @@ if "%DRY_RUN%"=="1" (
     )
 )
 
-set "SIGNING_THUMBPRINT="
-if "%DRY_RUN%"=="1" (
-    echo [dry-run] Capture signing thumbprint for "%DIST_DIR%\Plexible.exe"
-) else (
-    if defined SIGN_CERT_THUMBPRINT (
-        set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
-    ) else (
-        set "SIGNING_THUMBPRINT_FILE=%ARTIFACTS_DIR%\signing_thumbprint.txt"
-        del /f /q "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
-        python "%RELEASE_TOOL%" signing-thumbprint --exe "%DIST_DIR%\Plexible.exe" --output "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
-        if exist "%SIGNING_THUMBPRINT_FILE%" set /p SIGNING_THUMBPRINT=<"%SIGNING_THUMBPRINT_FILE%"
-    )
+call :capture_signing_thumbprint
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
 )
 
-if "%DRY_RUN%"=="1" (
-    echo [dry-run] Compress-Archive -Path "%DIST_DIR%" -DestinationPath "%ZIP_PATH%" -Force
-) else (
-    echo Creating release zip...
-    python "%RELEASE_TOOL%" zipdir --input-dir "%DIST_DIR%" --output "%ZIP_PATH%"
-    if errorlevel 1 (
-        echo Zip creation failed!
-        popd >nul
-        exit /b 1
-    )
-    copy /y "%ZIP_PATH%" "%ZIP_LATEST%" >nul
+call :create_release_zip
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
 )
 
-if "%DRY_RUN%"=="1" (
-    echo [dry-run] Compute SHA-256 and manifest for "%ZIP_PATH%"
-) else (
-    set "ZIP_SHA="
-    set "ZIP_HASH_FILE=%ARTIFACTS_DIR%\zip_hash.txt"
-    del /f /q "%ZIP_HASH_FILE%" >nul 2>&1
-    python "%RELEASE_TOOL%" sha256 --input "%ZIP_PATH%" --output "%ZIP_HASH_FILE%" >nul 2>&1
-    if exist "%ZIP_HASH_FILE%" set /p ZIP_SHA=<"%ZIP_HASH_FILE%"
-    if "%ZIP_SHA%"=="" (
-        certutil -hashfile "%ZIP_PATH%" SHA256 > "%ZIP_HASH_FILE%" 2>nul
-        if exist "%ZIP_HASH_FILE%" (
-            for /f "usebackq delims=" %%A in (`findstr /R /I "^[0-9A-F ][0-9A-F ]*$" "%ZIP_HASH_FILE%"`) do (
-                if not defined ZIP_SHA set "ZIP_SHA=%%A"
-            )
-            if defined ZIP_SHA set "ZIP_SHA=!ZIP_SHA: =!"
-        )
-    )
-    if "%ZIP_SHA%"=="" (
-        echo ERROR: Failed to compute SHA-256 for "%ZIP_PATH%".
-        popd >nul
-        exit /b 1
-    )
-    set "PUBLISHED_AT="
-    set "PUBLISHED_AT_FILE=%ARTIFACTS_DIR%\published_at.txt"
-    del /f /q "%PUBLISHED_AT_FILE%" >nul 2>&1
-    python "%RELEASE_TOOL%" utcnow --output "%PUBLISHED_AT_FILE%" >nul 2>&1
-    if exist "%PUBLISHED_AT_FILE%" set /p PUBLISHED_AT=<"%PUBLISHED_AT_FILE%"
-    if "%PUBLISHED_AT%"=="" (
-        echo ERROR: Failed to compute published_at timestamp.
-        popd >nul
-        exit /b 1
-    )
-    if "%SIGNING_THUMBPRINT%"=="" (
-        python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
-    ) else (
-        python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
-    )
+call :build_manifest_assets
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
 )
 
 if "%DO_RELEASE%"=="0" (
@@ -340,6 +292,83 @@ echo Release v%NEXT_VERSION% created successfully.
 popd >nul
 exit /b 0
 
+:capture_signing_thumbprint
+set "SIGNING_THUMBPRINT="
+if "%DRY_RUN%"=="1" (
+    echo [dry-run] Capture signing thumbprint for "%DIST_DIR%\Plexible.exe"
+    exit /b 0
+)
+if defined SIGN_CERT_THUMBPRINT (
+    set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
+    exit /b 0
+)
+set "SIGNING_THUMBPRINT_FILE=%ARTIFACTS_DIR%\signing_thumbprint.txt"
+del /f /q "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
+python "%RELEASE_TOOL%" signing-thumbprint --exe "%DIST_DIR%\Plexible.exe" --output "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
+call :read_var_from_file SIGNING_THUMBPRINT "%SIGNING_THUMBPRINT_FILE%"
+exit /b 0
+
+:create_release_zip
+if "%DRY_RUN%"=="1" (
+    echo [dry-run] Compress-Archive -Path "%DIST_DIR%" -DestinationPath "%ZIP_PATH%" -Force
+    exit /b 0
+)
+echo Creating release zip...
+python "%RELEASE_TOOL%" zipdir --input-dir "%DIST_DIR%" --output "%ZIP_PATH%"
+if errorlevel 1 (
+    echo Zip creation failed!
+    exit /b 1
+)
+copy /y "%ZIP_PATH%" "%ZIP_LATEST%" >nul
+if errorlevel 1 (
+    echo Failed to copy "%ZIP_PATH%" to "%ZIP_LATEST%".
+    exit /b 1
+)
+exit /b 0
+
+:build_manifest_assets
+if "%DRY_RUN%"=="1" (
+    echo [dry-run] Compute SHA-256 and manifest for "%ZIP_PATH%"
+    exit /b 0
+)
+set "ZIP_SHA="
+set "ZIP_HASH_FILE=%ARTIFACTS_DIR%\zip_hash.txt"
+del /f /q "%ZIP_HASH_FILE%" >nul 2>&1
+python "%RELEASE_TOOL%" sha256 --input "%ZIP_PATH%" --output "%ZIP_HASH_FILE%" >nul 2>&1
+call :read_var_from_file ZIP_SHA "%ZIP_HASH_FILE%"
+if "%ZIP_SHA%"=="" (
+    certutil -hashfile "%ZIP_PATH%" SHA256 > "%ZIP_HASH_FILE%" 2>nul
+    if exist "%ZIP_HASH_FILE%" (
+        for /f "usebackq delims=" %%A in (`findstr /R /I "^[0-9A-F ][0-9A-F ]*$" "%ZIP_HASH_FILE%"`) do (
+            if not defined ZIP_SHA set "ZIP_SHA=%%A"
+        )
+        if defined ZIP_SHA set "ZIP_SHA=!ZIP_SHA: =!"
+    )
+)
+if "%ZIP_SHA%"=="" (
+    echo ERROR: Failed to compute SHA-256 for "%ZIP_PATH%".
+    exit /b 1
+)
+set "PUBLISHED_AT="
+set "PUBLISHED_AT_FILE=%ARTIFACTS_DIR%\published_at.txt"
+del /f /q "%PUBLISHED_AT_FILE%" >nul 2>&1
+python "%RELEASE_TOOL%" utcnow --output "%PUBLISHED_AT_FILE%" >nul 2>&1
+call :read_var_from_file PUBLISHED_AT "%PUBLISHED_AT_FILE%"
+if "%PUBLISHED_AT%"=="" (
+    echo ERROR: Failed to compute published_at timestamp.
+    exit /b 1
+)
+if "%SIGNING_THUMBPRINT%"=="" (
+    python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
+) else (
+    python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
+)
+if errorlevel 1 (
+    echo Failed to write update manifest.
+    exit /b 1
+)
+exit /b 0
+
 :safe_remove_dir
 set "SAFE_TARGET=%~f1"
 set "SAFE_ROOT=%~f2"
@@ -372,4 +401,11 @@ if /i not "!SAFE_TARGET_NAME!"=="%SAFE_EXPECTED_NAME%" (
     exit /b 1
 )
 if exist "!SAFE_TARGET!\" rd /s /q "!SAFE_TARGET!"
+exit /b 0
+
+:read_var_from_file
+if "%~1"=="" exit /b 1
+if "%~2"=="" exit /b 1
+if not exist "%~2" exit /b 0
+set /p %~1=<"%~2"
 exit /b 0
