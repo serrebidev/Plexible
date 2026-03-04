@@ -26,6 +26,7 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 - **Hidden Imports**: Standard libraries like `concurrent.futures`, `urllib3`, and `ctypes`, plus `requests` dependencies (`certifi`, `idna`, `charset_normalizer`) should be explicitly listed to ensure they are available in the frozen bundle.
 
 ## Instructions for Future Agents
+- **Build Quality**: Always fix any warnings, bugs, or errors encountered during the build process when possible. Do not ignore or skip over them.
 - **Testing**: When adding features, test within the frozen environment context (check `sys.frozen`) as path resolution for `config.json` and assets changes.
 - **VLC Pathing**: If playback fails in a build, verify the `PYTHON_VLC_MODULE_PATH` environment variable which is set dynamically by the app.
 - **PlexAPI**: Always ensure the `plexapi` fork from `pushingkarmaorg` is used, as it contains specific fixes or features relied upon by the service layer.
