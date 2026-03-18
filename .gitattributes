@@ -1,0 +1,6 @@
+build/** linguist-generated=true
+*.exe linguist-generated=true
+*.pyc linguist-generated=true
+*.pyz linguist-generated=true
+*.toc linguist-generated=true
+*.pkg linguist-generated=true
