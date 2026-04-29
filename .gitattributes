@@ -1,4 +1,6 @@
 build/** linguist-generated=true
+dist/** linguist-generated=true
+*.zip linguist-generated=true
 *.exe linguist-generated=true
 *.pyc linguist-generated=true
 *.pyz linguist-generated=true

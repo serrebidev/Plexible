@@ -5,12 +5,25 @@ from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
+
+def keep_wx_submodule(name):
+    # Plexible does not use wx.lib.pubsub; collecting it emits wx deprecation
+    # warnings and a non-fatal missing hidden-import error in PyInstaller.
+    return not name.startswith('wx.lib.pubsub')
+
+
+def keep_urllib3_submodule(name):
+    # Browser-only urllib3 support imports pyodide/js modules that do not exist
+    # in the Windows desktop runtime.
+    return not name.startswith('urllib3.contrib.emscripten')
+
+
 # Collect all submodules for key packages
 hidden_imports = collect_submodules('plexapi')
 hidden_imports += collect_submodules('plex_client')
-hidden_imports += collect_submodules('wx')
+hidden_imports += collect_submodules('wx', filter=keep_wx_submodule, on_error='ignore')
 hidden_imports += collect_submodules('requests')
-hidden_imports += collect_submodules('urllib3')
+hidden_imports += collect_submodules('urllib3', filter=keep_urllib3_submodule, on_error='ignore')
 hidden_imports += collect_submodules('vlc')
 hidden_imports += [
     'vlc',
@@ -32,6 +45,25 @@ hidden_imports += [
     'concurrent.futures',
 ]
 
+excluded_imports = [
+    'wx.lib.pubsub',
+    'wx.lib.pubsub.core.datamsg',
+    'urllib3.contrib.emscripten',
+    'urllib3.contrib.emscripten.fetch',
+    'ascii__mypyc',
+    'confusion__mypyc',
+    'escape__mypyc',
+    'magic__mypyc',
+    'orchestrator__mypyc',
+    'statistical__mypyc',
+    'structural__mypyc',
+    'utf1632__mypyc',
+    'utf8__mypyc',
+    'validity__mypyc',
+    'pycparser.lextab',
+    'pycparser.yacctab',
+]
+
 added_files = [
     ('requirements.txt', '.'),
     ('agents.md', '.'),
@@ -47,7 +79,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excluded_imports,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
