@@ -1,2 +1,2 @@
 ## Other
-- Reduce PyInstaller optional import warnings
+- Preserve v1.39.4 release artifacts

@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import zipfile
 from datetime import datetime, timezone
@@ -226,17 +227,24 @@ def _signing_thumbprint(args: argparse.Namespace) -> int:
     exe_path = str(Path(args.exe).resolve())
     exe_literal = exe_path.replace("'", "''")
     # Run PowerShell from Python to avoid cmd.exe block parser issues in batch scripts.
+    # Prefer pwsh when it is available; Windows PowerShell can inherit PowerShell 7
+    # module paths from the environment and fail to load Get-AuthenticodeSignature.
     command = (
         f"$sig = Get-AuthenticodeSignature -LiteralPath '{exe_literal}'; "
         "if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint }"
     )
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", command],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    thumbprint = (result.stdout or "").strip()
+    thumbprint = ""
+    candidates = [shell for shell in (shutil.which("pwsh"), shutil.which("powershell")) if shell]
+    for shell in candidates or ["powershell"]:
+        result = subprocess.run(
+            [shell, "-NoProfile", "-Command", command],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        thumbprint = (result.stdout or "").strip()
+        if result.returncode == 0 and thumbprint:
+            break
     if args.output:
         Path(args.output).write_text((thumbprint + "\n") if thumbprint else "", encoding="utf-8")
     elif thumbprint:

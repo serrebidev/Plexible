@@ -1,8 +1,9 @@
 {
-  "version": "1.39.4",
-  "asset": "Plexible-v1.39.4.zip",
-  "download_url": "https://github.com/serrebidev/Plexible/releases/download/v1.39.4/Plexible-v1.39.4.zip",
-  "sha256": "edd18cbeb8453cfd48f38112e0e205cdcf1e54a6400570ce2d0b3933b9f0991f",
-  "published_at": "2026-04-29T20:47:49.328562+00:00",
-  "notes": "## Other\n- Reduce PyInstaller optional import warnings"
+  "version": "1.39.5",
+  "asset": "Plexible-v1.39.5.zip",
+  "download_url": "https://github.com/serrebidev/Plexible/releases/download/v1.39.5/Plexible-v1.39.5.zip",
+  "sha256": "6d64fe8ee011e34964d2bb0688bcdef3b33bdc0d65121b95a8b230ad4b68922e",
+  "published_at": "2026-04-29T22:04:37.398316+00:00",
+  "notes": "## Other\n- Preserve v1.39.4 release artifacts",
+  "signing_thumbprint": "FB99DDCECA07B170E0A950F0C780AD899D28D770"
 }
