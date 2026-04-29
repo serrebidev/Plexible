@@ -43,14 +43,18 @@ def _latest_semver_tag() -> Tuple[Optional[str], Optional[Tuple[int, int, int]]]
 
 
 def _collect_commits(range_spec: str) -> List[Tuple[str, str]]:
-    log = _run_git("log", range_spec, "--pretty=format:%s%x1f%b%x1e")
+    log = _run_git("log", range_spec, "--no-merges", "--pretty=format:%s%x1f%b%x1e")
     entries: List[Tuple[str, str]] = []
+    seen_subjects = set()
     for record in log.split("\x1e"):
         record = record.strip()
         if not record:
             continue
         parts = record.split("\x1f", 1)
         subject = parts[0].strip()
+        if subject in seen_subjects:
+            continue
+        seen_subjects.add(subject)
         body = parts[1].strip() if len(parts) > 1 else ""
         entries.append((subject, body))
     return entries
@@ -165,7 +169,7 @@ def _manifest(args: argparse.Namespace) -> int:
 
 
 def _repo_origin(args: argparse.Namespace) -> int:
-    owner = "serrebi"
+    owner = "serrebidev"
     name = "Plexible"
     try:
         url = _run_git("remote", "get-url", "origin")

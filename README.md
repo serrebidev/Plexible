@@ -14,7 +14,7 @@ Plexible is a desktop Plex client built with wxPython and the latest [`python-pl
 
 1. Run the application:
    ```bash
-   python main.py
+   py -3.14 main.py
    ```
    Missing dependencies are installed automatically on first launch. The script invokes `python -m pip install -r requirements.txt` under the hood and may restart itself once installation completes.
 
@@ -49,7 +49,7 @@ build_exe.bat build
 
 **Using PyInstaller directly:**
 ```bash
-pyinstaller plexible.spec
+py -3.14 -m PyInstaller plexible.spec
 ```
 The output will be in the `dist/Plexible` folder. Run `Plexible.exe` from that directory.
 
@@ -57,6 +57,7 @@ The output will be in the `dist/Plexible` folder. Run `Plexible.exe` from that d
 The build script now supports automated releases and update metadata generation.
 
 **Prerequisites**
+- Python 3.14 installed. The batch script prefers `py -3.14`; set `PLEXIBLE_PYTHON` if you need to point at a specific Python 3.14 executable.
 - Git and GitHub CLI (`gh`) installed and authenticated (`gh auth login`).
 - Windows SDK signtool available (defaults to `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe`).
 - Code signing certificate installed and accessible by signtool.

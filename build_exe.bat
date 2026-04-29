@@ -37,6 +37,11 @@ if not exist "%ROOT_DIR%.git\" if not exist "%ROOT_DIR%.git" (
     popd >nul
     exit /b 1
 )
+call :detect_python
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
+)
 echo Cleaning up old build artifacts...
 call :safe_remove_dir "%ROOT_DIR%build" "%ROOT_DIR_NOSLASH%" "build"
 if errorlevel 1 (
@@ -50,7 +55,7 @@ if errorlevel 1 (
 )
 
 echo Running PyInstaller...
-pyinstaller --noconfirm "%ROOT_DIR%plexible.spec"
+%PYTHON_CMD% -m PyInstaller --noconfirm "%ROOT_DIR%plexible.spec"
 
 if %ERRORLEVEL% EQU 0 (
     echo.
@@ -106,6 +111,11 @@ if not exist "%ROOT_DIR%.git\" if not exist "%ROOT_DIR%.git" (
     popd >nul
     exit /b 1
 )
+call :detect_python
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
+)
 
 set "BUILD_DIR=%ROOT_DIR%build"
 set "DIST_ROOT=%ROOT_DIR%dist"
@@ -135,9 +145,9 @@ if "%DRY_RUN%"=="0" (
     )
 )
 
-set "REPO_OWNER=serrebi"
+set "REPO_OWNER=serrebidev"
 set "REPO_NAME=Plexible"
-for /f "usebackq tokens=1* delims==" %%A in (`python "%RELEASE_TOOL%" repo-origin`) do (
+for /f "usebackq tokens=1* delims==" %%A in (`%PYTHON_CMD% "%RELEASE_TOOL%" repo-origin`) do (
     set "%%A=%%B"
 )
 
@@ -158,12 +168,12 @@ if "%DRY_RUN%"=="1" (
 )
 
 if "%DRY_RUN%"=="1" (
-    for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute`) do set "%%A=%%B"
+    for /f "usebackq tokens=1,2 delims==" %%A in (`%PYTHON_CMD% "%RELEASE_TOOL%" compute`) do set "%%A=%%B"
 ) else (
     if "%DO_RELEASE%"=="1" (
-        for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute --version-file "%VERSION_FILE%" --notes-file "%NOTES_FILE%" --apply`) do set "%%A=%%B"
+        for /f "usebackq tokens=1,2 delims==" %%A in (`%PYTHON_CMD% "%RELEASE_TOOL%" compute --version-file "%VERSION_FILE%" --notes-file "%NOTES_FILE%" --apply`) do set "%%A=%%B"
     ) else (
-        for /f "usebackq tokens=1,2 delims==" %%A in (`python "%RELEASE_TOOL%" compute --notes-file "%NOTES_FILE%"`) do set "%%A=%%B"
+        for /f "usebackq tokens=1,2 delims==" %%A in (`%PYTHON_CMD% "%RELEASE_TOOL%" compute --notes-file "%NOTES_FILE%"`) do set "%%A=%%B"
     )
 )
 
@@ -181,10 +191,10 @@ set "DOWNLOAD_URL=https://github.com/%REPO_OWNER%/%REPO_NAME%/releases/download/
 if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
 
 if "%DRY_RUN%"=="1" (
-    echo [dry-run] pyinstaller --noconfirm "%SPEC_FILE%"
+    echo [dry-run] %PYTHON_CMD% -m PyInstaller --noconfirm "%SPEC_FILE%"
 ) else (
     echo Running PyInstaller...
-    pyinstaller --noconfirm "%SPEC_FILE%"
+    %PYTHON_CMD% -m PyInstaller --noconfirm "%SPEC_FILE%"
     if errorlevel 1 (
         echo Build failed!
         popd >nul
@@ -304,7 +314,7 @@ if defined SIGN_CERT_THUMBPRINT (
 )
 set "SIGNING_THUMBPRINT_FILE=%ARTIFACTS_DIR%\signing_thumbprint.txt"
 del /f /q "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
-python "%RELEASE_TOOL%" signing-thumbprint --exe "%DIST_DIR%\Plexible.exe" --output "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
+%PYTHON_CMD% "%RELEASE_TOOL%" signing-thumbprint --exe "%DIST_DIR%\Plexible.exe" --output "%SIGNING_THUMBPRINT_FILE%" >nul 2>&1
 call :read_var_from_file SIGNING_THUMBPRINT "%SIGNING_THUMBPRINT_FILE%"
 exit /b 0
 
@@ -314,7 +324,7 @@ if "%DRY_RUN%"=="1" (
     exit /b 0
 )
 echo Creating release zip...
-python "%RELEASE_TOOL%" zipdir --input-dir "%DIST_DIR%" --output "%ZIP_PATH%"
+%PYTHON_CMD% "%RELEASE_TOOL%" zipdir --input-dir "%DIST_DIR%" --output "%ZIP_PATH%"
 if errorlevel 1 (
     echo Zip creation failed!
     exit /b 1
@@ -334,7 +344,7 @@ if "%DRY_RUN%"=="1" (
 set "ZIP_SHA="
 set "ZIP_HASH_FILE=%ARTIFACTS_DIR%\zip_hash.txt"
 del /f /q "%ZIP_HASH_FILE%" >nul 2>&1
-python "%RELEASE_TOOL%" sha256 --input "%ZIP_PATH%" --output "%ZIP_HASH_FILE%" >nul 2>&1
+%PYTHON_CMD% "%RELEASE_TOOL%" sha256 --input "%ZIP_PATH%" --output "%ZIP_HASH_FILE%" >nul 2>&1
 call :read_var_from_file ZIP_SHA "%ZIP_HASH_FILE%"
 if "%ZIP_SHA%"=="" (
     certutil -hashfile "%ZIP_PATH%" SHA256 > "%ZIP_HASH_FILE%" 2>nul
@@ -352,21 +362,49 @@ if "%ZIP_SHA%"=="" (
 set "PUBLISHED_AT="
 set "PUBLISHED_AT_FILE=%ARTIFACTS_DIR%\published_at.txt"
 del /f /q "%PUBLISHED_AT_FILE%" >nul 2>&1
-python "%RELEASE_TOOL%" utcnow --output "%PUBLISHED_AT_FILE%" >nul 2>&1
+%PYTHON_CMD% "%RELEASE_TOOL%" utcnow --output "%PUBLISHED_AT_FILE%" >nul 2>&1
 call :read_var_from_file PUBLISHED_AT "%PUBLISHED_AT_FILE%"
 if "%PUBLISHED_AT%"=="" (
     echo ERROR: Failed to compute published_at timestamp.
     exit /b 1
 )
 if "%SIGNING_THUMBPRINT%"=="" (
-    python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
+    %PYTHON_CMD% "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --output "%MANIFEST_FILE%"
 ) else (
-    python "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
+    %PYTHON_CMD% "%RELEASE_TOOL%" manifest --version "%NEXT_VERSION%" --asset-name "%ZIP_NAME%" --download-url "%DOWNLOAD_URL%" --sha256 "%ZIP_SHA%" --published-at "%PUBLISHED_AT%" --notes-file "%NOTES_FILE%" --signing-thumbprint "%SIGNING_THUMBPRINT%" --output "%MANIFEST_FILE%"
 )
 if errorlevel 1 (
     echo Failed to write update manifest.
     exit /b 1
 )
+exit /b 0
+
+:detect_python
+if defined PYTHON_CMD goto :validate_python
+if defined PLEXIBLE_PYTHON (
+    set "PYTHON_CMD=%PLEXIBLE_PYTHON%"
+    goto :validate_python
+)
+py -3.14 -c "import sys; raise SystemExit(not (sys.version_info.major == 3 and sys.version_info.minor == 14))" >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_CMD=py -3.14"
+    goto :validate_python
+)
+python -c "import sys; raise SystemExit(not (sys.version_info.major == 3 and sys.version_info.minor == 14))" >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_CMD=python"
+    goto :validate_python
+)
+echo ERROR: Python 3.14 is required. Install Python 3.14 or set PLEXIBLE_PYTHON.
+exit /b 1
+
+:validate_python
+%PYTHON_CMD% -c "import sys; raise SystemExit(not (sys.version_info.major == 3 and sys.version_info.minor == 14))" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: %PYTHON_CMD% is not Python 3.14.
+    exit /b 1
+)
+for /f "usebackq delims=" %%V in (`%PYTHON_CMD% --version`) do echo Using %%V
 exit /b 0
 
 :safe_remove_dir

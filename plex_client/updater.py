@@ -21,7 +21,7 @@ from .config import ConfigStore
 from .version import APP_NAME, APP_USER_AGENT, APP_VERSION
 
 
-GITHUB_OWNER = "serrebi"
+GITHUB_OWNER = "serrebidev"
 GITHUB_REPO = "Plexible"
 APP_EXE_NAME = "Plexible.exe"
 UPDATE_MANIFEST_NAME = "Plexible-update.json"
