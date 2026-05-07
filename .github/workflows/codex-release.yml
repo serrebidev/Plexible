@@ -1,0 +1,127 @@
+name: Codex Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/codex-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plexible-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install -r requirements.txt
+
+      - name: Prepare signing certificate
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=Plexible CI Release" `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -KeyAlgorithm RSA `
+            -KeyLength 4096 `
+            -HashAlgorithm SHA256 `
+            -KeyUsage DigitalSignature `
+            -NotAfter (Get-Date).AddYears(3)
+          "SIGN_CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+
+      - name: Locate signtool
+        shell: pwsh
+        run: |
+          $kitRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $tool = Get-ChildItem -Path $kitRoot -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $tool) {
+            throw "signtool.exe was not found under $kitRoot"
+          }
+          "SIGNTOOL_PATH=$($tool.FullName)" >> $env:GITHUB_ENV
+
+      - name: Delete draft releases
+        shell: pwsh
+        run: |
+          $draftLines = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --paginate --jq '.[] | select(.draft == true) | "\(.id)`t\(.tag_name)"')
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          foreach ($line in $draftLines) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+              continue
+            }
+            $parts = $line -split "`t", 2
+            $id = $parts[0]
+            $tag = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+            Write-Host "Deleting draft release $tag ($id)"
+            gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/$id"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+
+      - name: Run release batch
+        shell: cmd
+        run: build_exe.bat release
+
+      - name: Verify release state
+        shell: pwsh
+        run: |
+          $draftTags = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --paginate --jq '.[] | select(.draft == true) | .tag_name')
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          if ($draftTags.Count -gt 0) {
+            Write-Error "Draft releases still exist: $($draftTags -join ', ')"
+            exit 1
+          }
+
+          $latestDraft = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq '.draft'
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $latestTag = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq '.tag_name'
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          if ($latestDraft.Trim() -ne "false") {
+            Write-Error "Latest release $latestTag is a draft."
+            exit 1
+          }
+          Write-Host "Latest release $latestTag is published, and no draft releases exist."
