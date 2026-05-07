@@ -1,0 +1,12 @@
+# Claude Code local settings
+.claude/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local release artifacts
+release/*.local.*
+release/published_at.txt
+release/signing_thumbprint.txt
+release/zip_hash.txt
