@@ -107,3 +107,6 @@ The release manifest can include `signing_thumbprint` to allow updates signed wi
 ## License
 
 This project is provided without an explicit license. Adapt it to your needs or reach out if you require formal licensing terms.
+
+##Submit bugs in issues, or join my Telegram group!
+(https://t.me/SerrebiProjects)
