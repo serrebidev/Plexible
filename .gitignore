@@ -11,6 +11,13 @@ config.json
 __pycache__/
 *.pyc
 
+# PyInstaller build output
+build/
+dist/
+
+# Release zips (published as GitHub release assets, not tracked here)
+*.zip
+
 # Local release artifacts
 release/*.local.*
 release/published_at.txt
