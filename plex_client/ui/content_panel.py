@@ -9,7 +9,109 @@ from plexapi.base import PlexObject
 from ..plex_service import PlayableMedia
 
 
-class MetadataPanel(wx.Panel):
+class NamedAccessible(wx.Accessible):
+    """Simple accessible wrapper that exposes a constant name and role.
+
+    Use this on wx.Panel and other containers so NVDA reads a meaningful
+    name instead of the generic class name ("panel", "grouping", etc.).
+    """
+
+    _ROLE_MAP: dict[str, int] = {
+        "list": wx.ROLE_SYSTEM_LIST,
+        "tree": wx.ROLE_SYSTEM_OUTLINE,
+        "table": wx.ROLE_SYSTEM_TABLE,
+        "group": wx.ROLE_SYSTEM_GROUPING,
+        "pane": wx.ROLE_SYSTEM_PANE,
+        "text": wx.ROLE_SYSTEM_TEXT,
+        "slider": wx.ROLE_SYSTEM_SLIDER,
+    }
+
+    def __init__(self, name: str, role: str = "list") -> None:
+        super().__init__()
+        self._name = name
+        self._role = self._ROLE_MAP.get(role, wx.ROLE_SYSTEM_LIST)
+
+    def set_name(self, name: str) -> None:
+        """Update the announced name in place (the wxAccessible stays attached)."""
+        self._name = name
+
+    def GetName(self, childId: int) -> tuple[int, str]:
+        if childId == 0:
+            return wx.ACC_OK, self._name
+        return wx.ACC_NOT_IMPLEMENTED, ""
+
+    def GetRole(self, childId: int) -> tuple[int, int]:
+        return wx.ACC_OK, self._role
+
+
+class NonFocusablePanel(wx.Panel):
+    """A wx.Panel that is a tab stop only when it has something to descend into.
+
+    wxWidgets gives a TAB_TRAVERSAL container the focus itself when it has no
+    focusable child, so decorative strips and empty panels become tab stops that
+    NVDA announces as a bare "panel" — and Tab then gets stuck on them, because
+    traversal from inside a childless container finds nowhere to go.
+
+    Two hooks decide this, and only one of them actually governs traversal:
+
+        AcceptsFocus()             -- may this panel hold focus itself?
+        AcceptsFocusFromKeyboard() -- is this panel part of the Tab cycle?
+
+    Overriding AcceptsFocus() alone does nothing: wxNavigationEnabled computes
+    AcceptsFocusFromKeyboard() as ``HasAnyFocusableChildren() ||
+    BaseWindowClass::AcceptsFocusFromKeyboard()``, and that second term is an
+    explicitly scoped, NON-virtual call that never reaches a Python override.
+    Verified with wx.UIActionSimulator: AcceptsFocus() False alongside
+    AcceptsFocusFromKeyboard() True still takes and traps focus.
+
+    Overriding AcceptsFocusFromKeyboard() to a flat False is equally wrong — it
+    removes the whole subtree, so every control inside becomes unreachable.
+
+    So answer it honestly: join the cycle only when a child can take the focus,
+    in which case wx forwards to that child rather than stopping here.
+    """
+
+    def _has_focusable_child(self) -> bool:
+        for child in self.GetChildren():
+            if child.IsShown() and child.IsEnabled() and child.AcceptsFocusFromKeyboard():
+                return True
+        return False
+
+    def AcceptsFocus(self) -> bool:
+        return False
+
+    def AcceptsFocusFromKeyboard(self) -> bool:
+        return self._has_focusable_child()
+
+
+class DecorativePanel(NonFocusablePanel):
+    """Purely visual panel (accent bars, separators, the video surface).
+
+    Has no children, so it is always out of the Tab cycle.
+    """
+
+
+class TransparentContainer(NonFocusablePanel):
+    """Hosts real controls and forwards Tab to them, but is never a stop itself.
+
+    Drops out of the cycle entirely when every child is hidden or disabled.
+    """
+
+
+def name_control(window: wx.Window, name: str, role: str = "list") -> NamedAccessible:
+    """Attach a stable accessible name to a native control.
+
+    wx.Window.SetName alone does not reach MSAA for native controls
+    (tree views, edits, sliders), so NVDA announces only the control type.
+    The returned accessible must be kept alive by the caller.
+    """
+    window.SetName(name)
+    accessible = NamedAccessible(name, role)
+    window.SetAccessible(accessible)
+    return accessible
+
+
+class MetadataPanel(TransparentContainer):
     """Shows metadata for the selected Plex object and exposes playback actions."""
 
     def __init__(
@@ -19,29 +121,46 @@ class MetadataPanel(wx.Panel):
         on_radio: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(parent)
+        self.SetAccessible(NamedAccessible("Metadata Panel", "pane"))
         self._on_play = on_play
         self._on_radio = on_radio
 
+        # Title with visual accent bar
         self._title = wx.StaticText(self, label="Select an item to see details.")
+        self._title.SetName("Selected Item Title")
         bold_font = self._title.GetFont()
         bold_font.SetPointSize(bold_font.GetPointSize() + 2)
         bold_font.SetWeight(wx.FONTWEIGHT_BOLD)
         self._title.SetFont(bold_font)
+        self._title.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_CAPTIONTEXT))
+
+        # Thin accent bar under the title (decorative only, never focusable)
+        self._title_accent = DecorativePanel(self, size=(-1, 2))
+        self._title_accent.SetName("Title Accent")
+        self._title_accent.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_HIGHLIGHT))
 
         self._type_label = wx.StaticText(self, label="")
+        self._type_label.SetName("Media Type")
+        self._type_label.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
         self._queue_focus_handler: Optional[Callable[[], bool]] = None
-        self._summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_NONE)
+        self._summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_THEME)
         self._summary.SetMinSize((200, 120))
-        self._summary.SetName("Status")
+        # SetName does not reach MSAA for a native edit, so NVDA used to announce
+        # only "edit read only multi line". Attach a real accessible instead.
+        self._summary_accessible = name_control(self._summary, "Item Description", "text")
         self._summary.Bind(wx.EVT_NAVIGATION_KEY, self._handle_summary_navigation)
 
         self._play_button = wx.Button(self, wx.ID_ANY, label="Play")
+        self._play_button.SetName("Play Selected Item")
+        self._play_button.SetBackgroundColour(wx.Colour(46, 125, 50))
+        self._play_button.SetForegroundColour(wx.WHITE)
         self._play_button.Disable()
         self._play_button.Bind(wx.EVT_BUTTON, self._handle_play)
         self._play_button.Bind(wx.EVT_CHAR_HOOK, self._handle_play_char)
         self._play_button.Bind(wx.EVT_KEY_DOWN, self._handle_play_key)
 
         self._radio_button = wx.Button(self, wx.ID_ANY, label="Radio…")
+        self._radio_button.SetName("Start Radio")
         self._radio_button.Disable()
         self._radio_button.Hide()
         self._radio_button.Bind(wx.EVT_BUTTON, self._handle_radio)
@@ -51,8 +170,9 @@ class MetadataPanel(wx.Panel):
         button_row.Add(self._radio_button, 0)
 
         layout = wx.BoxSizer(wx.VERTICAL)
-        layout.Add(self._title, 0, wx.ALL | wx.EXPAND, 8)
-        layout.Add(self._type_label, 0, wx.LEFT | wx.RIGHT, 8)
+        layout.Add(self._title, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        layout.Add(self._title_accent, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8)
+        layout.Add(self._type_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
         layout.Add(self._summary, 1, wx.ALL | wx.EXPAND, 8)
         layout.Add(button_row, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizer(layout)
@@ -61,6 +181,16 @@ class MetadataPanel(wx.Panel):
         self._status_text: str = ""
         self._radio_visible: bool = False
         self._radio_loading: bool = False
+
+    def description_control(self) -> wx.Window:
+        """The description edit — first Tab stop inside this panel."""
+        return self._summary
+
+    def play_control(self) -> wx.Window:
+        return self._play_button
+
+    def radio_control(self) -> wx.Window:
+        return self._radio_button
 
     def set_queue_focus_handler(self, handler: Optional[Callable[[], bool]]) -> None:
         """Register a callback to move focus to the playback queue."""
@@ -84,7 +214,6 @@ class MetadataPanel(wx.Panel):
 
         summary = getattr(obj, "summary", "")
         self._summary.SetValue(summary or "")
-        self._summary.SetName("Description" if playable else "Status")
 
         self._current_media = playable
         if playable:
@@ -130,7 +259,6 @@ class MetadataPanel(wx.Panel):
 
     def _apply_status_text(self) -> None:
         self._summary.SetValue(self._status_text or "")
-        self._summary.SetName("Status")
         self._play_button.Disable()
 
     def _handle_play(self, _: wx.CommandEvent) -> None:
@@ -179,24 +307,8 @@ class MetadataPanel(wx.Panel):
         event.Skip()
 
 
-class _NamedAccessible(wx.Accessible):
-    """Simple accessible wrapper that exposes a constant name."""
-
-    def __init__(self, name: str) -> None:
-        super().__init__()
-        self._name = name
-
-    def GetName(self, childId: int) -> tuple[int, str]:
-        if childId == 0:
-            return wx.ACC_OK, self._name
-        return wx.ACC_NOT_IMPLEMENTED, ""
-
-    def GetRole(self, childId: int) -> tuple[int, int]:
-        return wx.ACC_OK, wx.ROLE_SYSTEM_LIST
-
-
-class QueuesPanel(wx.Panel):
-    """Displays Continue Watching and Up Next queues."""
+class QueuesPanel(TransparentContainer):
+    """Displays Continue Watching and Up Next queues using accessible wx.ListBox controls."""
 
     _MIN_LIST_HEIGHT = 140
 
@@ -208,6 +320,7 @@ class QueuesPanel(wx.Panel):
         on_refresh: Callable[[], None],
     ) -> None:
         super().__init__(parent)
+        self.SetAccessible(NamedAccessible("Queue Panels", "pane"))
         self._on_play = on_play
         self._on_select = on_select
         self._on_refresh = on_refresh
@@ -215,7 +328,7 @@ class QueuesPanel(wx.Panel):
         self._continue_items: List[PlayableMedia] = []
         self._upnext_items: List[PlayableMedia] = []
         self._suppress_events = False
-        self._accessible_refs: List[_NamedAccessible] = []
+        self._accessible_refs: List[NamedAccessible] = []
         self._continue_label = "Continue Watching"
         self._upnext_label = "Up Next"
         self._continue_last_key: Optional[str] = None
@@ -224,27 +337,25 @@ class QueuesPanel(wx.Panel):
         self._upnext_last_index: int = -1
         self._last_focus_list: Optional[str] = None
 
-        self._continue_list = self._create_list()
-        self._continue_list.InsertColumn(0, "Title")
-        self._continue_list.InsertColumn(1, "Progress")
+        continue_box_widget = wx.StaticBox(self, label=self._continue_label)
+        continue_box = wx.StaticBoxSizer(continue_box_widget, wx.VERTICAL)
+        self._continue_list = self._create_list(continue_box_widget)
         self._set_accessibility(self._continue_list, self._continue_label)
-        self._continue_placeholder = wx.StaticText(self, label="")
+        self._continue_placeholder = wx.StaticText(continue_box_widget, label="")
         self._continue_placeholder.Hide()
 
-        self._upnext_list = self._create_list()
-        self._upnext_list.InsertColumn(0, "Title")
-        self._upnext_list.InsertColumn(1, "Type")
+        upnext_box_widget = wx.StaticBox(self, label=self._upnext_label)
+        upnext_box = wx.StaticBoxSizer(upnext_box_widget, wx.VERTICAL)
+        self._upnext_list = self._create_list(upnext_box_widget)
         self._set_accessibility(self._upnext_list, self._upnext_label)
-        self._upnext_placeholder = wx.StaticText(self, label="")
+        self._upnext_placeholder = wx.StaticText(upnext_box_widget, label="")
         self._upnext_placeholder.Hide()
 
         self._bind_events()
 
-        continue_box = wx.StaticBoxSizer(wx.StaticBox(self, label=self._continue_label), wx.VERTICAL)
         continue_box.Add(self._continue_list, 1, wx.EXPAND)
         continue_box.Add(self._continue_placeholder, 0, wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, 12)
 
-        upnext_box = wx.StaticBoxSizer(wx.StaticBox(self, label=self._upnext_label), wx.VERTICAL)
         upnext_box.Add(self._upnext_list, 1, wx.EXPAND)
         upnext_box.Add(self._upnext_placeholder, 0, wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, 12)
 
@@ -252,6 +363,12 @@ class QueuesPanel(wx.Panel):
         root.Add(continue_box, 1, wx.EXPAND | wx.ALL, 6)
         root.Add(upnext_box, 1, wx.EXPAND | wx.ALL, 6)
         self.SetSizer(root)
+
+    def continue_control(self) -> wx.Window:
+        return self._continue_list
+
+    def upnext_control(self) -> wx.Window:
+        return self._upnext_list
 
     def show_placeholders(self, continue_message: str, up_next_message: str) -> None:
         self._continue_items.clear()
@@ -306,92 +423,98 @@ class QueuesPanel(wx.Panel):
         if restored is not None:
             selection_restored = True
         if not selection_restored:
-            self._on_select(None)
+            # No previous selection to restore — default to first available item
+            # so the user can press Enter immediately without arrowing first.
+            if self._continue_items and self._continue_list.GetSelection() == wx.NOT_FOUND:
+                self._select_list_index(self._continue_list, 0)
+                self._on_select(self._continue_items[0])
+                self._last_focus_list = "continue"
+                self._continue_last_index = 0
+                self._continue_last_key = self._continue_items[0].key
+                selection_restored = True
+            elif self._upnext_items and self._upnext_list.GetSelection() == wx.NOT_FOUND:
+                self._select_list_index(self._upnext_list, 0)
+                self._on_select(self._upnext_items[0])
+                self._last_focus_list = "upnext"
+                self._upnext_last_index = 0
+                self._upnext_last_key = self._upnext_items[0].key
+                selection_restored = True
+            else:
+                self._on_select(None)
         self.Layout()
 
-    def _create_list(self) -> wx.ListCtrl:
-        list_ctrl = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_NONE)
-        list_ctrl.SetMinSize((-1, self._MIN_LIST_HEIGHT))
-        return list_ctrl
+    def _create_list(self, parent: Optional[wx.Window] = None) -> wx.ListBox:
+        list_box = wx.ListBox(parent or self, style=wx.LB_SINGLE | wx.BORDER_THEME)
+        list_box.SetMinSize((-1, self._MIN_LIST_HEIGHT))
+        return list_box
 
     def _bind_events(self) -> None:
-        self._continue_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_continue_selected)
-        self._continue_list.Bind(wx.EVT_LIST_ITEM_DESELECTED, self._on_list_deselected)
-        self._continue_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_continue_activated)
-        self._continue_list.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
+        self._continue_list.Bind(wx.EVT_LISTBOX, self._on_continue_selected)
+        self._continue_list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_continue_activated)
+        # Use EVT_CHAR_HOOK instead of EVT_KEY_DOWN because the native
+        # Windows ListBox consumes VK_RETURN at WM_KEYDOWN before wx sees it.
+        # CHAR_HOOK fires at WM_CHAR level and catches Enter reliably.
+        self._continue_list.Bind(wx.EVT_CHAR_HOOK, self._on_list_key)
 
-        self._upnext_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_upnext_selected)
-        self._upnext_list.Bind(wx.EVT_LIST_ITEM_DESELECTED, self._on_list_deselected)
-        self._upnext_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_upnext_activated)
-        self._upnext_list.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
+        self._upnext_list.Bind(wx.EVT_LISTBOX, self._on_upnext_selected)
+        self._upnext_list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_upnext_activated)
+        self._upnext_list.Bind(wx.EVT_CHAR_HOOK, self._on_list_key)
 
     def _populate_list(
         self,
-        list_ctrl: wx.ListCtrl,
+        list_box: wx.ListBox,
         items: List[PlayableMedia],
         secondary_formatter: Callable[[PlayableMedia], str],
     ) -> None:
         self._suppress_events = True
         try:
-            list_ctrl.Freeze()
-            list_ctrl.DeleteAllItems()
-            for idx, media in enumerate(items):
-                list_ctrl.InsertItem(idx, self._format_title(media))
-                list_ctrl.SetItem(idx, 1, secondary_formatter(media))
-            self._autosize_columns(list_ctrl)
-            self._clear_selection(list_ctrl)
+            list_box.Freeze()
+            list_box.Clear()
+            labels = []
+            for media in items:
+                title = self._format_title(media)
+                secondary = secondary_formatter(media)
+                if secondary:
+                    label = f"{title}  ·  {secondary}"
+                else:
+                    label = title
+                labels.append(label)
+            list_box.Set(labels)
+            self._clear_selection(list_box)
         finally:
-            list_ctrl.Thaw()
+            list_box.Thaw()
             self._suppress_events = False
 
-    def _autosize_columns(self, list_ctrl: wx.ListCtrl) -> None:
-        column_count = list_ctrl.GetColumnCount()
-        if column_count == 0:
-            return
-        width = list_ctrl.GetClientSize().width
-        if width <= 0:
-            width = 400
-        primary_width = max(int(width * 0.7), 240)
-        secondary_width = max(width - primary_width - 12, 120)
-        list_ctrl.SetColumnWidth(0, primary_width)
-        list_ctrl.SetColumnWidth(1, secondary_width)
-
-    def _clear_selection(self, list_ctrl: wx.ListCtrl) -> None:
+    def _clear_selection(self, list_box: wx.ListBox) -> None:
         previous = self._suppress_events
         self._suppress_events = True
         try:
-            index = list_ctrl.GetFirstSelected()
-            while index != -1:
-                list_ctrl.SetItemState(index, 0, wx.LIST_STATE_SELECTED)
-                index = list_ctrl.GetNextItem(index, wx.LIST_NEXT_ALL, wx.LIST_STATE_SELECTED)
+            list_box.SetSelection(wx.NOT_FOUND)
         finally:
             self._suppress_events = previous
 
-    def _set_accessibility(self, window: wx.Window, name: str) -> None:
-        window.SetName(name)
-        accessible = _NamedAccessible(name)
-        window.SetAccessible(accessible)
-        self._accessible_refs.append(accessible)
+    def _set_accessibility(self, window: wx.Window, name: str, role: str = "list") -> None:
+        self._accessible_refs.append(name_control(window, name, role))
 
     def _set_placeholder(
         self,
-        list_ctrl: wx.ListCtrl,
+        list_box: wx.ListBox,
         placeholder: wx.StaticText,
         message: str,
     ) -> None:
         self._suppress_events = True
         try:
-            list_ctrl.Hide()
+            list_box.Hide()
             placeholder.SetLabel(message)
             placeholder.Show()
-            self._clear_selection(list_ctrl)
-            list_ctrl.DeleteAllItems()
+            self._clear_selection(list_box)
+            list_box.Clear()
         finally:
             self._suppress_events = False
 
-    def _show_list(self, list_ctrl: wx.ListCtrl, placeholder: wx.StaticText) -> None:
+    def _show_list(self, list_box: wx.ListBox, placeholder: wx.StaticText) -> None:
         placeholder.Hide()
-        list_ctrl.Show()
+        list_box.Show()
         placeholder.SetLabel("")
 
     def _format_title(self, media: PlayableMedia) -> str:
@@ -431,10 +554,10 @@ class QueuesPanel(wx.Panel):
         media_type = getattr(item, "type", "") or ""
         return media_type.capitalize()
 
-    def _on_continue_selected(self, event: wx.ListEvent) -> None:
+    def _on_continue_selected(self, event: wx.CommandEvent) -> None:
         if self._suppress_events:
             return
-        index = event.GetIndex()
+        index = event.GetSelection()
         self._clear_selection(self._upnext_list)
         media = self._continue_items[index] if 0 <= index < len(self._continue_items) else None
         if media:
@@ -444,10 +567,10 @@ class QueuesPanel(wx.Panel):
         self._on_select(media)
         event.Skip()
 
-    def _on_upnext_selected(self, event: wx.ListEvent) -> None:
+    def _on_upnext_selected(self, event: wx.CommandEvent) -> None:
         if self._suppress_events:
             return
-        index = event.GetIndex()
+        index = event.GetSelection()
         self._clear_selection(self._continue_list)
         media = self._upnext_items[index] if 0 <= index < len(self._upnext_items) else None
         if media:
@@ -457,23 +580,13 @@ class QueuesPanel(wx.Panel):
         self._on_select(media)
         event.Skip()
 
-    def _on_list_deselected(self, _: wx.ListEvent) -> None:
-        if self._suppress_events:
-            return
-        if (
-            self._continue_list.GetSelectedItemCount() == 0
-            and self._upnext_list.GetSelectedItemCount() == 0
-        ):
-            self._last_focus_list = None
-            self._on_select(None)
-
-    def _on_continue_activated(self, event: wx.ListEvent) -> None:
-        index = event.GetIndex()
+    def _on_continue_activated(self, event: wx.CommandEvent) -> None:
+        index = event.GetSelection()
         if 0 <= index < len(self._continue_items):
             self._on_play(self._continue_items[index])
 
-    def _on_upnext_activated(self, event: wx.ListEvent) -> None:
-        index = event.GetIndex()
+    def _on_upnext_activated(self, event: wx.CommandEvent) -> None:
+        index = event.GetSelection()
         if 0 <= index < len(self._upnext_items):
             self._on_play(self._upnext_items[index])
 
@@ -482,6 +595,18 @@ class QueuesPanel(wx.Panel):
             if self._on_refresh:
                 self._on_refresh()
             return
+        if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            focus = wx.Window.FindFocus()
+            if focus is self._continue_list:
+                idx = self._continue_list.GetSelection()
+                if 0 <= idx < len(self._continue_items):
+                    self._on_play(self._continue_items[idx])
+                    return
+            elif focus is self._upnext_list:
+                idx = self._upnext_list.GetSelection()
+                if 0 <= idx < len(self._upnext_items):
+                    self._on_play(self._upnext_items[idx])
+                    return
         event.Skip()
 
     def _restore_last_selection(self) -> Optional[PlayableMedia]:
@@ -537,18 +662,13 @@ class QueuesPanel(wx.Panel):
                 return bounded
         return None
 
-    def _select_list_index(self, list_ctrl: wx.ListCtrl, index: int) -> bool:
-        if index < 0 or index >= list_ctrl.GetItemCount():
+    def _select_list_index(self, list_box: wx.ListBox, index: int) -> bool:
+        if index < 0 or index >= list_box.GetCount():
             return False
         previous = self._suppress_events
         self._suppress_events = True
         try:
-            list_ctrl.SetItemState(
-                index,
-                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
-                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
-            )
-            list_ctrl.EnsureVisible(index)
+            list_box.SetSelection(index)
         finally:
             self._suppress_events = previous
         return True

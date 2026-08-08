@@ -196,6 +196,7 @@ class PlexService:
         self._resources: List[MyPlexResource] = []
         self._server: Optional[PlexServer] = None
         self._current_resource_id: Optional[str] = None
+        self._last_connect_fallback: bool = False
         self._last_search_errors: List[str] = []
         self._radio_station_cache: Dict[str, List[MusicRadioStation]] = {}
         self._music_category_cache: Dict[str, List[MusicCategory]] = {}
@@ -260,6 +261,31 @@ class PlexService:
             return self.refresh_servers()
         return self._resources
 
+    @staticmethod
+    def discover_local_servers(timeout: int = 3) -> List[Dict[str, Any]]:
+        """Discover Plex servers on the local network using GDM.
+
+        Returns a list of dicts with keys: name, host, port, clientIdentifier.
+        """
+        from plexapi.gdm import GDM
+
+        gdm = GDM()
+        # GDM.scan() only accepts ``scan_for_clients`` and stores its results on
+        # ``entries`` instead of returning them.
+        discovered = gdm.scan()
+        if discovered is None:
+            discovered = list(getattr(gdm, "entries", None) or [])
+        results: List[Dict[str, Any]] = []
+        for entry in discovered:
+            data = entry.get("data", entry)
+            results.append({
+                "name": data.get("Name", "Unknown"),
+                "host": data.get("Host", entry.get("host", "")),
+                "port": int(data.get("Port", entry.get("port", 32400))),
+                "clientIdentifier": data.get("Client-Identifier", data.get("Resource-Identifier", "")),
+            })
+        return results
+
     def connect(self, identifier: Optional[str] = None) -> PlexServer:
         servers = self.available_servers()
         if not servers:
@@ -311,6 +337,9 @@ class PlexService:
 
         if target is None:
             target = servers[0]
+            self._last_connect_fallback = True
+        else:
+            self._last_connect_fallback = False
         return self.connect_resource(target)
 
     def connect_resource(self, resource: MyPlexResource) -> PlexServer:
@@ -342,7 +371,7 @@ class PlexService:
         name = resource.name or resource.clientIdentifier or "Plex Server"
         attempts: List[Tuple[str, Dict[str, Optional[object]]]] = []
         base_locations = ["local", "remote", "relay"]
-        base_timeout = 6
+        base_timeout = 8
         if prefer_local:
             attempts.append(
                 (
@@ -359,18 +388,24 @@ class PlexService:
         attempts.append(
             (
                 "fallback",
-                {"ssl": None, "timeout": None, "locations": base_locations},
+                {"ssl": None, "timeout": 20, "locations": base_locations},
             )
         )
+        # Retry each strategy up to 3 times with progressive backoff for transient failures
         last_exc: Optional[Exception] = None
-        for label, kwargs in attempts:
-            try:
-                server = self._call_with_supported_kwargs(resource.connect, **kwargs)
-                print(f"[PlexService] Connected to {name} via {label} strategy.")
-                return server
-            except Exception as exc:
-                last_exc = exc
-                print(f"[PlexService] {reason} attempt '{label}' failed for {name}: {exc}")
+        for attempt_idx in range(3):
+            for label, kwargs in attempts:
+                try:
+                    server = self._call_with_supported_kwargs(resource.connect, **kwargs)
+                    print(f"[PlexService] Connected to {name} via {label} strategy.")
+                    return server
+                except Exception as exc:
+                    last_exc = exc
+                    error_msg = str(exc)[:120]
+                    print(f"[PlexService] {reason} attempt {attempt_idx+1} '{label}' failed for {name}: {error_msg}")
+            if attempt_idx < 2:
+                delay = (attempt_idx + 1) * 1.5
+                time.sleep(delay)
         if last_exc:
             raise last_exc
         raise RuntimeError(f"Unable to connect to Plex resource '{name}'.")
@@ -675,9 +710,28 @@ class PlexService:
             return cached
         characters = self._fetch_first_character_entries(section, category)
         buckets: List[MusicAlphaBucket] = []
+        libtype_map = {"artists": "artist", "albums": "album", "tracks": "track"}
+        libtype = libtype_map.get(category, category.rstrip("s"))
+        category_display = {"artists": "artists", "albums": "albums", "tracks": "songs"}.get(category, category)
+
         if characters:
-            libtype_map = {"artists": "artist", "albums": "album", "tracks": "track"}
-            libtype = libtype_map.get(category, category.rstrip("s"))
+            # Add a "Browse All" bucket at the top for direct flat browsing
+            total_count = sum(int(getattr(c, "size", 0) or 0) for c in characters)
+            browse_all_key = f"{cache_key}:browse_all"
+            buckets.append(
+                MusicAlphaBucket(
+                    identifier=browse_all_key,
+                    title=f"Browse All {category_display.title()} ({total_count})",
+                    key="__browse_all__",
+                    category=category,
+                    libtype=libtype,
+                    section=section,
+                    count=total_count,
+                    summary=f"Browse all {total_count} {category_display} without letter groupings.",
+                    character="",
+                )
+            )
+
             for character in characters:
                 key = getattr(character, "key", None)
                 if not key:
@@ -685,8 +739,8 @@ class PlexService:
                 raw_title = str(getattr(character, "title", "")) or "#"
                 count = int(getattr(character, "size", 0) or 0)
                 bucket_id = f"{cache_key}:{raw_title}"
-                summary = f"{count} item{'s' if count != 1 else ''} starting with '{raw_title}'"
-                display_title = f"{raw_title} ({count})" if count else raw_title
+                summary = f"{count} {libtype}{'s' if count != 1 else ''} starting with '{raw_title}'"
+                display_title = f"{raw_title} · {count} {libtype}{'s' if count != 1 else ''}" if count else raw_title
                 buckets.append(
                     MusicAlphaBucket(
                         identifier=bucket_id,
@@ -709,6 +763,13 @@ class PlexService:
         cached = self._music_alpha_items_cache.get(bucket.identifier)
         if cached is not None:
             return cached
+        if bucket.key == "__browse_all__":
+            items = list(
+                self._music_category_direct_items(bucket.section, bucket.category)
+            )
+            if items:
+                self._music_alpha_items_cache[bucket.identifier] = items
+            return items
         try:
             items = list(bucket.section.fetchItems(bucket.key))
         except Exception as exc:  # noqa: BLE001
@@ -720,7 +781,10 @@ class PlexService:
             if fallback_items:
                 print(f"[MusicCategory] Falling back to search for bucket '{bucket.title}'.")
             hydrated = fallback_items
-        self._music_alpha_items_cache[bucket.identifier] = hydrated
+        if hydrated:
+            # A letter bucket only exists because the server reported items for it,
+            # so an empty result means a failed lookup: don't cache it for the session.
+            self._music_alpha_items_cache[bucket.identifier] = hydrated
         return hydrated
 
     def _playlist_items(self, playlist: PlexObject) -> List[PlexObject]:
@@ -1110,10 +1174,12 @@ class PlexService:
 
         seen_keys: Set[str] = set()
         for hub_ref, item in station_candidates:
-            key = getattr(item, "key", None)
+            # Hub entries can expose the playable key as stationKey only; without it
+            # the station would be built with key=None and fail at playback time.
+            key = getattr(item, "key", None) or getattr(item, "stationKey", None)
             rating_key = getattr(item, "ratingKey", None)
             dedupe_key = str(rating_key or key or "")
-            if not dedupe_key or dedupe_key in seen_keys:
+            if not key or not dedupe_key or dedupe_key in seen_keys:
                 continue
             seen_keys.add(dedupe_key)
             category, station_type = self._classify_radio_station(hub_ref, item)
@@ -1209,14 +1275,14 @@ class PlexService:
         section: Optional[MusicSection],
         mode: str,
         description: str,
+        seed_rating_key: Optional[str] = None,
     ) -> tuple[PlayableMedia, RadioSession]:
         if section is None:
             raise RuntimeError("Music section is unavailable for radio playback.")
         seed: Optional[PlexObject] = None
-        rating_key = option.data.get("seed_rating_key")
-        if rating_key:
+        if seed_rating_key:
             try:
-                seed = self.fetch_item(str(rating_key))
+                seed = self.fetch_item(str(seed_rating_key))
             except Exception:
                 seed = None
         if seed is None:
@@ -1232,6 +1298,7 @@ class PlexService:
             includeRelated=1,
             continuous=1,
         )
+        queue.refresh()
         section_id = self._normalize_section_id(
             getattr(section, "librarySectionID", None) or getattr(section, "key", None)
         )
@@ -1370,6 +1437,7 @@ class PlexService:
     def _start_station_radio(self, station: MusicRadioStation) -> tuple[PlayableMedia, RadioSession]:
         server = self.ensure_server()
         queue = PlayQueue.fromStationKey(server, station.key)
+        queue.refresh()
         section_id = station.library_section_id or self._normalize_section_id(
             getattr(station.item, "librarySectionID", None)
         )
@@ -1397,6 +1465,7 @@ class PlexService:
             includeRelated=1,
             continuous=1,
         )
+        queue.refresh()
         section_id = library_section_id or self._normalize_section_id(getattr(seed, "librarySectionID", None))
         return self._initialize_radio_session(
             queue,
@@ -1563,12 +1632,14 @@ class PlexService:
         if action in {"library_radio", "recent_radio", "shuffle_radio"}:
             section = cast(MusicSection, option.data.get("section"))
             mode = option.data.get("mode", action)
-            return self._start_synthetic_radio(section, mode, option.label or option.id)
+            seed_rating_key = option.data.get("seed_rating_key")
+            return self._start_synthetic_radio(section, mode, option.label or option.id, seed_rating_key=seed_rating_key)
         raise RuntimeError(f"Unsupported radio option action '{action}'.")
 
     def start_playlist(self, playlist: PlexObject) -> tuple[PlayableMedia, RadioSession]:
         server = self.ensure_server()
         queue = self._create_play_queue(server, playlist, shuffle=0, continuous=0)
+        queue.refresh()
         section_id = self._normalize_section_id(getattr(playlist, "librarySectionID", None))
         description = getattr(playlist, "title", None) or "Playlist"
         return self._initialize_radio_session(
@@ -2659,6 +2730,27 @@ class PlexService:
         else:
             raise NotImplementedError(f"Item type {type(item)} does not support markUnwatched")
 
+    def mark_played(self, item: PlexObject) -> None:
+        """Mark an item as played."""
+        if hasattr(item, "markPlayed"):
+            item.markPlayed()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support markPlayed")
+
+    def mark_unplayed(self, item: PlexObject) -> None:
+        """Mark an item as unplayed."""
+        if hasattr(item, "markUnplayed"):
+            item.markUnplayed()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support markUnplayed")
+
+    def rate_item(self, item: PlexObject, rating: float) -> None:
+        """Rate an item (e.g., track, album, movie) on a 0.0-10.0 scale."""
+        if hasattr(item, "rate"):
+            item.rate(rating)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support rating")
+
     def upload_subtitles(self, item: PlexObject, filepath: str) -> None:
         """Upload subtitles to a video item."""
         if hasattr(item, "uploadSubtitles"):
@@ -2763,6 +2855,391 @@ class PlexService:
             item.analyze()
         else:
             raise NotImplementedError(f"Item type {type(item)} does not support analyze")
+
+    # =========================================================================
+    # METADATA EDITING
+    # =========================================================================
+
+    def edit_item_title(self, item: PlexObject, title: str) -> None:
+        """Edit the title of a media item."""
+        if hasattr(item, "editTitle"):
+            item.editTitle(title)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editTitle")
+
+    def edit_item_summary(self, item: PlexObject, summary: str) -> None:
+        """Edit the summary/description of a media item."""
+        if hasattr(item, "editSummary"):
+            item.editSummary(summary)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editSummary")
+
+    def edit_item_sort_title(self, item: PlexObject, sort_title: str) -> None:
+        """Edit the sort title of a media item."""
+        if hasattr(item, "editSortTitle"):
+            item.editSortTitle(sort_title)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editSortTitle")
+
+    def edit_item_user_rating(self, item: PlexObject, rating: float) -> None:
+        """Set the user rating on a media item (0.0-10.0 scale)."""
+        if hasattr(item, "editUserRating"):
+            item.editUserRating(rating)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editUserRating")
+
+    def edit_item_audience_rating(self, item: PlexObject, rating: float) -> None:
+        """Set the audience rating on a media item."""
+        if hasattr(item, "editAudienceRating"):
+            item.editAudienceRating(rating)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editAudienceRating")
+
+    def edit_item_critic_rating(self, item: PlexObject, rating: float) -> None:
+        """Set the critic rating on a media item."""
+        if hasattr(item, "editCriticRating"):
+            item.editCriticRating(rating)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editCriticRating")
+
+    def edit_item_content_rating(self, item: PlexObject, rating: str) -> None:
+        """Set the content rating on a media item (e.g., PG-13, TV-MA)."""
+        if hasattr(item, "editContentRating"):
+            item.editContentRating(rating)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editContentRating")
+
+    def edit_item_originally_available(self, item: PlexObject, date: str) -> None:
+        """Set the originally available date."""
+        if hasattr(item, "editOriginallyAvailable"):
+            item.editOriginallyAvailable(date)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editOriginallyAvailable")
+
+    def edit_item_original_title(self, item: PlexObject, title: str) -> None:
+        """Edit the original title of a media item."""
+        if hasattr(item, "editOriginalTitle"):
+            item.editOriginalTitle(title)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editOriginalTitle")
+
+    def edit_item_studio(self, item: PlexObject, studio: str) -> None:
+        """Edit the studio of a media item."""
+        if hasattr(item, "editStudio"):
+            item.editStudio(studio)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editStudio")
+
+    def edit_item_tagline(self, item: PlexObject, tagline: str) -> None:
+        """Edit the tagline of a media item."""
+        if hasattr(item, "editTagline"):
+            item.editTagline(tagline)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editTagline")
+
+    def edit_item_added_at(self, item: PlexObject, date: str) -> None:
+        """Edit the added-at date of a media item."""
+        if hasattr(item, "editAddedAt"):
+            item.editAddedAt(date)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editAddedAt")
+
+    def edit_item_edition_title(self, item: PlexObject, title: str) -> None:
+        """Edit the edition title of a media item (e.g., Director's Cut)."""
+        if hasattr(item, "editEditionTitle"):
+            item.editEditionTitle(title)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editEditionTitle")
+
+    def edit_item_track_artist(self, item: PlexObject, artist: str) -> None:
+        """Edit the track artist."""
+        if hasattr(item, "editTrackArtist"):
+            item.editTrackArtist(artist)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editTrackArtist")
+
+    def edit_item_track_number(self, item: PlexObject, number: int) -> None:
+        """Edit the track number."""
+        if hasattr(item, "editTrackNumber"):
+            item.editTrackNumber(number)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editTrackNumber")
+
+    def edit_item_disc_number(self, item: PlexObject, number: int) -> None:
+        """Edit the disc number."""
+        if hasattr(item, "editDiscNumber"):
+            item.editDiscNumber(number)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support editDiscNumber")
+
+    def edit_item_tags(
+        self,
+        item: PlexObject,
+        *,
+        add_genre: Optional[List[str]] = None,
+        remove_genre: Optional[List[str]] = None,
+        add_collection: Optional[List[str]] = None,
+        remove_collection: Optional[List[str]] = None,
+        add_label: Optional[List[str]] = None,
+        remove_label: Optional[List[str]] = None,
+        add_mood: Optional[List[str]] = None,
+        remove_mood: Optional[List[str]] = None,
+        add_style: Optional[List[str]] = None,
+        remove_style: Optional[List[str]] = None,
+        add_country: Optional[List[str]] = None,
+        remove_country: Optional[List[str]] = None,
+        add_director: Optional[List[str]] = None,
+        remove_director: Optional[List[str]] = None,
+        add_writer: Optional[List[str]] = None,
+        remove_writer: Optional[List[str]] = None,
+        add_producer: Optional[List[str]] = None,
+        remove_producer: Optional[List[str]] = None,
+        add_similar_artist: Optional[List[str]] = None,
+        remove_similar_artist: Optional[List[str]] = None,
+    ) -> None:
+        """Edit tags on a media item (genres, collections, labels, moods, etc.)."""
+        tag_ops = [
+            ("addGenre", add_genre),
+            ("removeGenre", remove_genre),
+            ("addCollection", add_collection),
+            ("removeCollection", remove_collection),
+            ("addLabel", add_label),
+            ("removeLabel", remove_label),
+            ("addMood", add_mood),
+            ("removeMood", remove_mood),
+            ("addStyle", add_style),
+            ("removeStyle", remove_style),
+            ("addCountry", add_country),
+            ("removeCountry", remove_country),
+            ("addDirector", add_director),
+            ("removeDirector", remove_director),
+            ("addWriter", add_writer),
+            ("removeWriter", remove_writer),
+            ("addProducer", add_producer),
+            ("removeProducer", remove_producer),
+            ("addSimilarArtist", add_similar_artist),
+            ("removeSimilarArtist", remove_similar_artist),
+        ]
+        any_supported = False
+        for method_name, values in tag_ops:
+            if values and hasattr(item, method_name):
+                any_supported = True
+                method = getattr(item, method_name)
+                for value in values:
+                    method(value)
+        if not any_supported:
+            raise NotImplementedError(f"Item type {type(item)} does not support tag editing")
+
+    # =========================================================================
+    # MATCH / UNMATCH
+    # =========================================================================
+
+    def match_item(self, item: PlexObject, title: str, year: Optional[str] = None, agent: Optional[str] = None) -> None:
+        """Search for and apply a metadata match for a media item."""
+        if hasattr(item, "matches"):
+            matches = item.matches(title, year=year, agent=agent) if year or agent else item.matches(title)
+            if matches:
+                item.fixMatch(matches[0])
+            else:
+                raise RuntimeError(f"No matches found for '{title}'")
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support matching")
+
+    def unmatch_item(self, item: PlexObject) -> None:
+        """Unmatch a media item from its metadata."""
+        if hasattr(item, "unmatch"):
+            item.unmatch()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support unmatch")
+
+    def fix_match(self, item: PlexObject, match_result: Any) -> None:
+        """Apply a specific match result to fix metadata matching."""
+        if hasattr(item, "fixMatch"):
+            item.fixMatch(match_result)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support fixMatch")
+
+    def get_matches(self, item: PlexObject, title: str, year: Optional[str] = None, agent: Optional[str] = None) -> List[Any]:
+        """Search for matching metadata candidates for a media item."""
+        if hasattr(item, "matches"):
+            return list(item.matches(title, year=year, agent=agent) if year or agent else item.matches(title))
+        raise NotImplementedError(f"Item type {type(item)} does not support matches")
+
+    # =========================================================================
+    # SPLIT / MERGE
+    # =========================================================================
+
+    def split_item(self, item: PlexObject) -> None:
+        """Split a media item into separate entries."""
+        if hasattr(item, "split"):
+            item.split()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support split")
+
+    def merge_items(self, item: PlexObject, other: PlexObject) -> None:
+        """Merge another media item into this one."""
+        if hasattr(item, "merge"):
+            item.merge(other)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support merge")
+
+    # =========================================================================
+    # ART MANAGEMENT
+    # =========================================================================
+
+    def set_item_art(self, item: PlexObject, art_url: str) -> None:
+        """Set the background art for a media item."""
+        if hasattr(item, "setArt"):
+            item.setArt(art_url)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support setArt")
+
+    def set_item_poster(self, item: PlexObject, poster_url: str) -> None:
+        """Set the poster for a media item."""
+        if hasattr(item, "setPoster"):
+            item.setPoster(poster_url)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support setPoster")
+
+    def set_item_logo(self, item: PlexObject, logo_url: str) -> None:
+        """Set the logo for a media item."""
+        if hasattr(item, "setLogo"):
+            item.setLogo(logo_url)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support setLogo")
+
+    def set_item_square_art(self, item: PlexObject, art_url: str) -> None:
+        """Set the square art for a media item."""
+        if hasattr(item, "setSquareArt"):
+            item.setSquareArt(art_url)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support setSquareArt")
+
+    def set_item_theme(self, item: PlexObject, theme_url: str) -> None:
+        """Set the theme music for a media item."""
+        if hasattr(item, "setTheme"):
+            item.setTheme(theme_url)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support setTheme")
+
+    def upload_item_art(self, item: PlexObject, filepath: str) -> None:
+        """Upload background art from a local file."""
+        if hasattr(item, "uploadArt"):
+            item.uploadArt(filepath)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support uploadArt")
+
+    def upload_item_poster(self, item: PlexObject, filepath: str) -> None:
+        """Upload a poster from a local file."""
+        if hasattr(item, "uploadPoster"):
+            item.uploadPoster(filepath)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support uploadPoster")
+
+    def upload_item_logo(self, item: PlexObject, filepath: str) -> None:
+        """Upload a logo from a local file."""
+        if hasattr(item, "uploadLogo"):
+            item.uploadLogo(filepath)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support uploadLogo")
+
+    def upload_item_square_art(self, item: PlexObject, filepath: str) -> None:
+        """Upload square art from a local file."""
+        if hasattr(item, "uploadSquareArt"):
+            item.uploadSquareArt(filepath)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support uploadSquareArt")
+
+    def upload_item_theme(self, item: PlexObject, filepath: str) -> None:
+        """Upload theme music from a local file."""
+        if hasattr(item, "uploadTheme"):
+            item.uploadTheme(filepath)
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support uploadTheme")
+
+    def lock_item_art(self, item: PlexObject) -> None:
+        """Lock the background art to prevent changes."""
+        if hasattr(item, "lockArt"):
+            item.lockArt()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support lockArt")
+
+    def unlock_item_art(self, item: PlexObject) -> None:
+        """Unlock the background art."""
+        if hasattr(item, "unlockArt"):
+            item.unlockArt()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support unlockArt")
+
+    def lock_item_poster(self, item: PlexObject) -> None:
+        """Lock the poster to prevent changes."""
+        if hasattr(item, "lockPoster"):
+            item.lockPoster()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support lockPoster")
+
+    def unlock_item_poster(self, item: PlexObject) -> None:
+        """Unlock the poster."""
+        if hasattr(item, "unlockPoster"):
+            item.unlockPoster()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support unlockPoster")
+
+    def lock_item_logo(self, item: PlexObject) -> None:
+        """Lock the logo to prevent changes."""
+        if hasattr(item, "lockLogo"):
+            item.lockLogo()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support lockLogo")
+
+    def unlock_item_logo(self, item: PlexObject) -> None:
+        """Unlock the logo."""
+        if hasattr(item, "unlockLogo"):
+            item.unlockLogo()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support unlockLogo")
+
+    def lock_item_theme(self, item: PlexObject) -> None:
+        """Lock the theme music to prevent changes."""
+        if hasattr(item, "lockTheme"):
+            item.lockTheme()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support lockTheme")
+
+    def unlock_item_theme(self, item: PlexObject) -> None:
+        """Unlock the theme music."""
+        if hasattr(item, "unlockTheme"):
+            item.unlockTheme()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support unlockTheme")
+
+    def delete_item_art(self, item: PlexObject) -> None:
+        """Delete the background art from a media item."""
+        if hasattr(item, "deleteArt"):
+            item.deleteArt()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support deleteArt")
+
+    def delete_item_poster(self, item: PlexObject) -> None:
+        """Delete the poster from a media item."""
+        if hasattr(item, "deletePoster"):
+            item.deletePoster()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support deletePoster")
+
+    def delete_item_logo(self, item: PlexObject) -> None:
+        """Delete the logo from a media item."""
+        if hasattr(item, "deleteLogo"):
+            item.deleteLogo()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support deleteLogo")
+
+    def delete_item_theme(self, item: PlexObject) -> None:
+        """Delete the theme music from a media item."""
+        if hasattr(item, "deleteTheme"):
+            item.deleteTheme()
+        else:
+            raise NotImplementedError(f"Item type {type(item)} does not support deleteTheme")
 
     # =========================================================================
     # USER/SHARING MANAGEMENT
@@ -3278,6 +3755,165 @@ class PlexService:
         """Get a specific client by name."""
         server = self.ensure_server()
         return server.client(name)
+
+    # =========================================================================
+    # CLIENT CONTROL (remote control of Plex clients on the network)
+    # =========================================================================
+
+    def client_play(self, name: str) -> None:
+        """Tell a client to start/resume playback."""
+        client = self.client(name)
+        client.play()
+
+    def client_pause(self, name: str) -> None:
+        """Tell a client to pause playback."""
+        client = self.client(name)
+        client.pause()
+
+    def client_stop(self, name: str) -> None:
+        """Tell a client to stop playback."""
+        client = self.client(name)
+        client.stop()
+
+    def client_seek_to(self, name: str, offset: int) -> None:
+        """Tell a client to seek to a position (in milliseconds)."""
+        client = self.client(name)
+        client.seekTo(offset)
+
+    def client_skip_next(self, name: str) -> None:
+        """Tell a client to skip to the next item."""
+        client = self.client(name)
+        client.skipNext()
+
+    def client_skip_previous(self, name: str) -> None:
+        """Tell a client to skip to the previous item."""
+        client = self.client(name)
+        client.skipPrevious()
+
+    def client_step_forward(self, name: str) -> None:
+        """Tell a client to step forward."""
+        client = self.client(name)
+        client.stepForward()
+
+    def client_step_back(self, name: str) -> None:
+        """Tell a client to step back."""
+        client = self.client(name)
+        client.stepBack()
+
+    def client_set_volume(self, name: str, volume: int) -> None:
+        """Set the volume on a client (0-100)."""
+        client = self.client(name)
+        client.setVolume(volume)
+
+    def client_set_audio_stream(self, name: str, stream_id: int) -> None:
+        """Set the audio stream on a client."""
+        client = self.client(name)
+        client.setAudioStream(stream_id)
+
+    def client_set_subtitle_stream(self, name: str, stream_id: int) -> None:
+        """Set the subtitle stream on a client."""
+        client = self.client(name)
+        client.setSubtitleStream(stream_id)
+
+    def client_set_video_stream(self, name: str, stream_id: int) -> None:
+        """Set the video stream on a client."""
+        client = self.client(name)
+        client.setVideoStream(stream_id)
+
+    def client_set_shuffle(self, name: str, shuffle: bool) -> None:
+        """Set shuffle mode on a client."""
+        client = self.client(name)
+        client.setShuffle(shuffle)
+
+    def client_set_repeat(self, name: str, repeat: bool) -> None:
+        """Set repeat mode on a client."""
+        client = self.client(name)
+        client.setRepeat(repeat)
+
+    def client_navigate_home(self, name: str) -> None:
+        """Send a client to the home screen."""
+        client = self.client(name)
+        client.goToHome()
+
+    def client_navigate_media(self, name: str, key: str) -> None:
+        """Tell a client to navigate to a media item."""
+        client = self.client(name)
+        client.goToMedia(key)
+
+    def client_navigate_music(self, name: str) -> None:
+        """Tell a client to navigate to its music section."""
+        client = self.client(name)
+        client.goToMusic()
+
+    def client_move_up(self, name: str) -> None:
+        """Send an up navigation command to a client."""
+        client = self.client(name)
+        client.moveUp()
+
+    def client_move_down(self, name: str) -> None:
+        """Send a down navigation command to a client."""
+        client = self.client(name)
+        client.moveDown()
+
+    def client_move_left(self, name: str) -> None:
+        """Send a left navigation command to a client."""
+        client = self.client(name)
+        client.moveLeft()
+
+    def client_move_right(self, name: str) -> None:
+        """Send a right navigation command to a client."""
+        client = self.client(name)
+        client.moveRight()
+
+    def client_select(self, name: str) -> None:
+        """Send a select/enter command to a client."""
+        client = self.client(name)
+        client.select()
+
+    def client_go_back(self, name: str) -> None:
+        """Send a back command to a client."""
+        client = self.client(name)
+        client.goBack()
+
+    def client_toggle_osd(self, name: str) -> None:
+        """Toggle the on-screen display on a client."""
+        client = self.client(name)
+        client.toggleOSD()
+
+    def client_context_menu(self, name: str) -> None:
+        """Open the context menu on a client."""
+        client = self.client(name)
+        client.contextMenu()
+
+    def client_page_up(self, name: str) -> None:
+        """Send a page up command to a client."""
+        client = self.client(name)
+        client.pageUp()
+
+    def client_page_down(self, name: str) -> None:
+        """Send a page down command to a client."""
+        client = self.client(name)
+        client.pageDown()
+
+    def client_next_letter(self, name: str) -> None:
+        """Jump to the next letter in the alphabet on a client."""
+        client = self.client(name)
+        client.nextLetter()
+
+    def client_previous_letter(self, name: str) -> None:
+        """Jump to the previous letter in the alphabet on a client."""
+        client = self.client(name)
+        client.previousLetter()
+
+    def client_play_media(self, client_name: str, item: PlexObject) -> None:
+        """Tell a client to start playing a specific media item."""
+        client = self.client(client_name)
+        client.playMedia(item)
+
+    def client_is_playing(self, name: str) -> bool:
+        """Check if a client is currently playing media."""
+        client = self.client(name)
+        return bool(client.isPlayingMedia())
 
     # =========================================================================
     # BANDWIDTH/STATISTICS

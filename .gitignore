@@ -1,6 +1,12 @@
 # Claude Code local settings
 .claude/
 
+# Local user config - contains the Plex auth token, never publish
+config.json
+
+# Local tool cache
+.freebuff/
+
 # Python bytecode
 __pycache__/
 *.pyc

@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -17,6 +18,10 @@ class ConfigStore:
         self._config_path = self._config_dir / self.CONFIG_FILENAME
         self._data: Dict[str, Any] = {}
         self._loaded = False
+        # The store is written from background threads (auth, playback progress,
+        # server connect) as well as the UI thread, so serialise the dict and the
+        # shared temp file used by _save_to_disk.
+        self._lock = threading.RLock()
         self._migrate_legacy_config()
 
     def _resolve_config_dir(self) -> Path:
@@ -70,22 +75,26 @@ class ConfigStore:
 
     @property
     def data(self) -> Dict[str, Any]:
-        if not self._loaded:
-            self._data = self._load_from_disk()
-            self._loaded = True
-        return self._data
+        with self._lock:
+            if not self._loaded:
+                self._data = self._load_from_disk()
+                self._loaded = True
+            return self._data
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self.data.get(key, default)
+        with self._lock:
+            return self.data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        self.data[key] = value
-        self._save_to_disk()
+        with self._lock:
+            self.data[key] = value
+            self._save_to_disk()
 
     def clear(self, key: str) -> None:
-        if key in self.data:
-            del self.data[key]
-            self._save_to_disk()
+        with self._lock:
+            if key in self.data:
+                del self.data[key]
+                self._save_to_disk()
 
     def _default_config(self) -> Dict[str, Any]:
         return {
@@ -107,16 +116,21 @@ class ConfigStore:
                 data = json.load(fp)
         except (json.JSONDecodeError, OSError):
             data = self._default_config()
+        if not isinstance(data, dict):
+            # A hand-edited or truncated file can hold valid JSON that is not an
+            # object (e.g. "null"); treat it as missing rather than crashing.
+            data = self._default_config()
         if "client_id" not in data or not data["client_id"]:
             data["client_id"] = uuid.uuid4().hex
         return data
 
     def _save_to_disk(self) -> None:
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._config_path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fp:
-            json.dump(self.data, fp, indent=2)
-        tmp_path.replace(self._config_path)
+        with self._lock:
+            self._config_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._config_path.with_suffix(".tmp")
+            with tmp_path.open("w", encoding="utf-8") as fp:
+                json.dump(self.data, fp, indent=2)
+            tmp_path.replace(self._config_path)
 
     def get_client_id(self) -> str:
         client_id = self.get("client_id")
@@ -178,21 +192,23 @@ class ConfigStore:
         self.set("preferred_servers", cleaned)
 
     def promote_preferred_server(self, primary: Optional[str], alias: Optional[str] = None) -> None:
-        tokens = self.get_preferred_servers()
-        ordered: list[str] = []
+        # Read-modify-write: hold the lock so a concurrent update is not lost.
+        with self._lock:
+            tokens = self.get_preferred_servers()
+            ordered: list[str] = []
 
-        def add_token(token: Optional[str]) -> None:
-            if not isinstance(token, str):
-                return
-            trimmed = token.strip()
-            if trimmed and trimmed not in ordered:
-                ordered.append(trimmed)
+            def add_token(token: Optional[str]) -> None:
+                if not isinstance(token, str):
+                    return
+                trimmed = token.strip()
+                if trimmed and trimmed not in ordered:
+                    ordered.append(trimmed)
 
-        add_token(primary)
-        add_token(alias)
-        for existing in tokens:
-            add_token(existing)
-        self.set("preferred_servers", ordered)
+            add_token(primary)
+            add_token(alias)
+            for existing in tokens:
+                add_token(existing)
+            self.set("preferred_servers", ordered)
 
     def get_vlc_path(self) -> Optional[str]:
         return self.get("vlc_path")
@@ -216,24 +232,47 @@ class ConfigStore:
     def set_auto_check_updates(self, enabled: bool) -> None:
         self.set("auto_check_updates", bool(enabled))
 
+    def get_music_label_style(self) -> str:
+        """Returns 'emoji', 'text', or 'none' for music tree label prefixes."""
+        value = self.get("music_label_style", "none")
+        if value in ("emoji", "text", "none"):
+            return value
+        return "none"
+
+    def set_music_label_style(self, style: str) -> None:
+        if style in ("emoji", "text", "none"):
+            self.set("music_label_style", style)
+
+    def get_ui_theme(self) -> str:
+        """Returns 'light' or 'dark' for the UI colour theme."""
+        value = self.get("ui_theme", "light")
+        return "dark" if value == "dark" else "light"
+
+    def set_ui_theme(self, theme: str) -> None:
+        if theme in ("light", "dark"):
+            self.set("ui_theme", theme)
+
     def get_pending_entry(self, rating_key: str) -> Dict[str, int]:
         progress = self.get_pending_progress()
         return progress.get(str(rating_key), {})
 
     def upsert_pending_progress(self, rating_key: str, position: int, duration: int, state: str = "playing") -> None:
-        progress = self.get_pending_progress()
-        progress[str(rating_key)] = {
-            "position": int(max(0, position)),
-            "duration": int(max(0, duration)),
-            "state": state,
-        }
-        self.set("pending_progress", progress)
+        # Read-modify-write: hold the lock so a concurrent update is not lost.
+        with self._lock:
+            progress = self.get_pending_progress()
+            progress[str(rating_key)] = {
+                "position": int(max(0, position)),
+                "duration": int(max(0, duration)),
+                "state": state,
+            }
+            self.set("pending_progress", progress)
 
     def remove_pending_progress(self, rating_key: str) -> None:
-        progress = self.get_pending_progress()
-        if str(rating_key) in progress:
-            del progress[str(rating_key)]
-            self.set("pending_progress", progress)
+        with self._lock:
+            progress = self.get_pending_progress()
+            if str(rating_key) in progress:
+                del progress[str(rating_key)]
+                self.set("pending_progress", progress)
 
     def clear_pending_progress(self) -> None:
         self.set("pending_progress", {})

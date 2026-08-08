@@ -17,6 +17,12 @@ import wx
 
 from ..config import ConfigStore
 from ..plex_service import PlayableMedia
+from .content_panel import (
+    DecorativePanel,
+    NamedAccessible,
+    TransparentContainer,
+    name_control,
+)
 from ..version import APP_USER_AGENT
 
 @dataclass
@@ -146,7 +152,7 @@ PlaybackState = dict[str, object]
 SEEK_STEP_MS = 10000
 
 
-class PlaybackPanel(wx.Panel):
+class PlaybackPanel(TransparentContainer):
     """Playback surface using LibVLC with automatic native fallbacks."""
 
     def __init__(
@@ -155,8 +161,10 @@ class PlaybackPanel(wx.Panel):
         config: ConfigStore,
         *,
         on_queue_activate: Optional[Callable[[int], None]] = None,
+        on_skip: Optional[Callable[[int], None]] = None,
     ) -> None:
         super().__init__(parent)
+        self.SetAccessible(NamedAccessible("Playback Panel", "pane"))
         self._config = config
         self._current: Optional[PlayableMedia] = None
         self._direct_url: Optional[str] = None
@@ -178,6 +186,7 @@ class PlaybackPanel(wx.Panel):
         self._fullscreen: bool = False
         self._fullscreen_frame: Optional[wx.Frame] = None
         self._fullscreen_video_panel: Optional[wx.Panel] = None
+        self._pre_fullscreen_focus: Optional[wx.Window] = None
         self._active_video_window: wx.Window
 
         self._vlc_instance: Optional["vlc.Instance"] = None
@@ -195,8 +204,10 @@ class PlaybackPanel(wx.Panel):
         self._vlc_event_manager: Optional["vlc.EventManager"] = None
         self._vlc_error_callback: Optional[Callable[[object], None]] = None
         self._queue_activate_callback = on_queue_activate
+        self._skip_callback = on_skip
 
         self._header = wx.StaticText(self, label="Nothing is playing.")
+        self._header.SetName("Playback Status")
         header_font = self._header.GetFont()
         header_font.SetPointSize(header_font.GetPointSize() + 1)
         self._header.SetFont(header_font)
@@ -204,31 +215,69 @@ class PlaybackPanel(wx.Panel):
         header_row = wx.BoxSizer(wx.HORIZONTAL)
         header_row.Add(self._header, 1, wx.ALIGN_CENTER_VERTICAL)
 
-        # Transport controls + volume
+        # Subtle separator line between header and controls (decorative, never focusable).
+        # SetCanFocus(False) is a no-op on a plain wx.Panel under MSW, which is why
+        # this used to appear in the Tab cycle as an unlabelled pane.
+        self._header_sep = DecorativePanel(self, size=(-1, 1))
+        self._header_sep.SetName("Playback Separator")
+        self._header_sep.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
+
+        # Transport controls + volume  (color-coded: green=play, amber=pause, red=stop)
         controls_bar = wx.BoxSizer(wx.HORIZONTAL)
         self._play_btn = wx.Button(self, wx.ID_APPLY, label="Play")
+        self._play_btn.SetName("Play")
+        self._play_btn.SetBackgroundColour(wx.Colour(46, 125, 50))
+        self._play_btn.SetForegroundColour(wx.WHITE)
         self._pause_btn = wx.Button(self, wx.ID_ANY, label="Pause")
+        self._pause_btn.SetName("Pause")
+        self._pause_btn.SetBackgroundColour(wx.Colour(245, 127, 23))
+        self._pause_btn.SetForegroundColour(wx.BLACK)
         self._stop_btn = wx.Button(self, wx.ID_STOP, label="Stop")
+        self._stop_btn.SetName("Stop")
+        self._stop_btn.SetBackgroundColour(wx.Colour(198, 40, 40))
+        self._stop_btn.SetForegroundColour(wx.WHITE)
+        self._prev_btn = wx.Button(self, wx.ID_ANY, label="⏮ Prev")
+        self._prev_btn.SetName("Previous track")
+        self._prev_btn.SetToolTip("Previous track")
+        self._next_btn = wx.Button(self, wx.ID_ANY, label="Next ⏭")
+        self._next_btn.SetName("Next track")
+        self._next_btn.SetToolTip("Next track")
         self._mute_btn = wx.ToggleButton(self, wx.ID_ANY, label="Mute")
+        # Without this NVDA announces the wx default name ("check").
+        self._mute_btn.SetName("Mute")
+        # Consistent minimum widths for transport buttons
+        for btn in (self._play_btn, self._pause_btn, self._stop_btn):
+            btn.SetMinSize((90, -1))
         self._play_btn.Bind(wx.EVT_BUTTON, self._on_play_clicked)
         self._play_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_play_char)
         self._pause_btn.Bind(wx.EVT_BUTTON, self._on_pause_clicked)
         self._pause_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_pause_char)
         self._stop_btn.Bind(wx.EVT_BUTTON, self._on_stop_clicked)
         self._stop_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_stop_char)
+        self._prev_btn.Bind(wx.EVT_BUTTON, self._on_prev_clicked)
+        self._next_btn.Bind(wx.EVT_BUTTON, self._on_next_clicked)
         self._mute_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_mute_toggled)
         self._mute_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_mute_char)
         controls_bar.Add(self._play_btn, 0, wx.RIGHT, 4)
         controls_bar.Add(self._pause_btn, 0, wx.RIGHT, 4)
-        controls_bar.Add(self._stop_btn, 0, wx.RIGHT, 12)
+        controls_bar.Add(self._stop_btn, 0, wx.RIGHT, 4)
+        controls_bar.Add(self._prev_btn, 0, wx.RIGHT, 4)
+        controls_bar.Add(self._next_btn, 0, wx.RIGHT, 12)
         controls_bar.Add(self._mute_btn, 0, wx.RIGHT, 6)
-        controls_bar.Add(wx.StaticText(self, label="Volume:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        vol_label = wx.StaticText(self, label="Volume:")
+        vol_label.SetName("Volume Label")
+        controls_bar.Add(vol_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self._volume_slider = wx.Slider(self, value=self._volume, minValue=0, maxValue=100, size=(160, -1))
+        # Native trackbars ignore SetName for MSAA, so name them properly.
+        self._volume_accessible = name_control(self._volume_slider, "Volume", "slider")
+        self._volume_slider.SetToolTip("Volume level")
         self._volume_slider.Bind(wx.EVT_SLIDER, self._on_volume_slider)
         controls_bar.Add(self._volume_slider, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         self._volume_label = wx.StaticText(self, label="")
+        self._volume_label.SetName("Volume Level")
         controls_bar.Add(self._volume_label, 0, wx.ALIGN_CENTER_VERTICAL)
         self._fullscreen_btn = wx.ToggleButton(self, wx.ID_ANY, label="Fullscreen")
+        self._fullscreen_btn.SetName("Toggle Fullscreen")
         self._fullscreen_btn.Enable(False)
         self._fullscreen_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_fullscreen_toggled)
         self._fullscreen_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_fullscreen_char)
@@ -236,25 +285,33 @@ class PlaybackPanel(wx.Panel):
         controls_bar.AddStretchSpacer()
 
         self._seek_slider = wx.Slider(self, value=0, minValue=0, maxValue=1, style=wx.SL_HORIZONTAL)
+        self._seek_accessible = name_control(self._seek_slider, "Seek", "slider")
         self._seek_slider.SetToolTip("Playback position")
+        seek_label = wx.StaticText(self, label="Seek:")
+        seek_label.SetName("Seek Label")
         self._seek_slider.Disable()
         self._seek_slider.Bind(wx.EVT_SCROLL_THUMBTRACK, self._on_seek_slider_track)
         self._seek_slider.Bind(wx.EVT_SCROLL_THUMBRELEASE, self._on_seek_slider_release)
         self._seek_slider.Bind(wx.EVT_SCROLL_CHANGED, self._on_seek_slider_changed)
         self._seek_slider.Bind(wx.EVT_CHAR_HOOK, self._handle_panel_char)
 
-        self._video_panel = wx.Panel(self)
+        # The video surface is a bare render target for libvlc — there is nothing
+        # to operate there with a keyboard, so it stays out of the Tab cycle.
+        # Fullscreen, seek and the transport buttons are the real controls.
+        self._video_panel = DecorativePanel(self)
+        self._video_panel.SetAccessible(NamedAccessible("Video Surface", "pane"))
         self._video_panel.SetBackgroundColour(wx.BLACK)
         self._active_video_window = self._video_panel
 
-        self._queue_panel = wx.Panel(self)
-        self._queue_panel.SetName("Queue Panel")
-        queue_box = wx.StaticBoxSizer(wx.StaticBox(self._queue_panel, label="Current Queue"), wx.VERTICAL)
+        self._queue_panel = TransparentContainer(self)
+        self._queue_panel.SetAccessible(NamedAccessible("Queue Panel", "pane"))
+        queue_box_widget = wx.StaticBox(self._queue_panel, label="Current Queue")
+        queue_box = wx.StaticBoxSizer(queue_box_widget, wx.VERTICAL)
         self._queue_tree = wx.TreeCtrl(
-            self._queue_panel,
+            queue_box_widget,
             style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_SINGLE,
         )
-        self._queue_tree.SetName("Current Queue")
+        self._queue_accessible = name_control(self._queue_tree, "Current Queue", "tree")
         self._queue_tree.SetMinSize((0, 150))
         self._queue_root = self._queue_tree.AddRoot("Queue Root")
         self._queue_tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self._on_queue_item_activated)
@@ -271,8 +328,12 @@ class PlaybackPanel(wx.Panel):
 
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(header_row, 0, wx.ALL | wx.EXPAND, 6)
+        layout.Add(self._header_sep, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 6)
         layout.Add(controls_bar, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
-        layout.Add(self._seek_slider, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
+        seek_row = wx.BoxSizer(wx.HORIZONTAL)
+        seek_row.Add(seek_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        seek_row.Add(self._seek_slider, 1, wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(seek_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
         layout.Add(self._video_panel, 1, wx.EXPAND | wx.ALL, 6)
         layout.Add(self._queue_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
         self.SetSizer(layout)
@@ -287,6 +348,21 @@ class PlaybackPanel(wx.Panel):
         self._notify_state()
 
     # ------------------------------------------------------------------ Public API
+
+    def transport_controls(self) -> list[wx.Window]:
+        """Controls in the order they should be reached with Tab."""
+        return [
+            self._play_btn,
+            self._pause_btn,
+            self._stop_btn,
+            self._prev_btn,
+            self._next_btn,
+            self._mute_btn,
+            self._volume_slider,
+            self._fullscreen_btn,
+            self._seek_slider,
+            self._queue_tree,
+        ]
 
     def set_state_listener(self, listener: Optional[Callable[[PlaybackState], None]]) -> None:
         self._state_listener = listener
@@ -336,7 +412,7 @@ class PlaybackPanel(wx.Panel):
         self._header.SetLabel("Unable to start playback for this item.")
         wx.MessageBox(
             "Plexible could not start LibVLC playback for this item.",
-            "Plexible",
+            "Playback Error",
             wx.ICON_WARNING | wx.OK,
             parent=self,
         )
@@ -345,6 +421,10 @@ class PlaybackPanel(wx.Panel):
         self._current = None
         self._direct_url = None
         self._browser_url = None
+        # _set_mode() published its state while _current was still set; refresh
+        # so listeners do not keep reporting has_media for the failed item.
+        self._update_controls_enabled()
+        self._notify_state()
         return "none"
 
     def set_queue_items(
@@ -604,6 +684,9 @@ class PlaybackPanel(wx.Panel):
         final_position = self._current_position()
         duration = self._current_duration()
         self._notify_timeline_state("stopped", final_position, duration, sync=True)
+        # Announce before clearing _current so we can mention the title
+        if self._current:
+            self._announce_accessible(f"Stopped: {self._current.title}")
         self._halt_current_playback()
         self._current = None
         self._direct_url = None
@@ -611,7 +694,7 @@ class PlaybackPanel(wx.Panel):
         self._is_paused = False
         self._resume_offset = 0
         self._resume_applied = False
-        self._pre_fullscreen_focus: Optional[wx.Window] = None
+        self._pre_fullscreen_focus = None
         self._header.SetLabel("Nothing is playing.")
         self._set_mode("stopped")
 
@@ -628,6 +711,7 @@ class PlaybackPanel(wx.Panel):
             except Exception:
                 position = 0
             self._notify_timeline_state("playing", position, self._current_duration())
+            self._announce_accessible("Resumed")
         else:
             return False
         self._notify_state()
@@ -646,6 +730,7 @@ class PlaybackPanel(wx.Panel):
                 position = 0
             self._cancel_timeline_poll()
             self._notify_timeline_state("paused", position, self._current_duration())
+            self._announce_accessible("Paused")
         else:
             return False
         self._notify_state()
@@ -825,6 +910,18 @@ class PlaybackPanel(wx.Panel):
         if not self.stop_playback():
             wx.Bell()
 
+    def _on_prev_clicked(self, _: wx.CommandEvent) -> None:
+        if self._skip_callback:
+            self._skip_callback(-1)
+        else:
+            wx.Bell()
+
+    def _on_next_clicked(self, _: wx.CommandEvent) -> None:
+        if self._skip_callback:
+            self._skip_callback(1)
+        else:
+            wx.Bell()
+
     def _on_mute_toggled(self, event: wx.CommandEvent) -> None:
         desired = bool(event.IsChecked())
         if desired != self._muted:
@@ -843,13 +940,27 @@ class PlaybackPanel(wx.Panel):
         self.set_volume(self._volume_slider.GetValue(), update_slider=False)
 
     def _on_destroy(self, event: wx.WindowDestroyEvent) -> None:
+        # wxWindowDestroyEvent is a command event, so it also bubbles up from
+        # every child window (message boxes and dir dialogs parented to this
+        # panel included). Only tear down when we are the window going away.
+        if event.GetWindow() is not self:
+            event.Skip()
+            return
+        self._destroying = True
         self._halt_current_playback()
+        self._cancel_pending_timers()
+        self._release_libvlc()
         event.Skip()
+
+    def _is_destroying(self) -> bool:
+        """True once EVT_WINDOW_DESTROY for this panel has been handled."""
+        return bool(getattr(self, "_destroying", False))
 
     # ------------------------------------------------------------- Playback helpers
 
     def _stop_libvlc_only(self) -> None:
         self._cancel_libvlc_timer()
+        self._cancel_resume_timer()
         self._detach_libvlc_events()
         if self._vlc_player:
             try:
@@ -857,6 +968,34 @@ class PlaybackPanel(wx.Panel):
             except Exception:
                 pass
         self._libvlc_check_attempts = 0
+
+    def _release_libvlc(self) -> None:
+        """Release the player/instance so LibVLC's worker threads shut down."""
+        player = self._vlc_player
+        instance = self._vlc_instance
+        self._vlc_player = None
+        self._vlc_instance = None
+        self._vlc_drawable = None
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                pass
+            try:
+                player.release()
+            except Exception:
+                pass
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception:
+                pass
+
+    def _cancel_pending_timers(self) -> None:
+        self._cancel_libvlc_timer()
+        self._cancel_timeline_poll()
+        self._cancel_resume_timer()
+        self._cancel_label_restore()
 
     def _attach_libvlc_events(self) -> None:
         if self._vlc_player is None or vlc is None:
@@ -984,6 +1123,12 @@ class PlaybackPanel(wx.Panel):
             resume_seconds = max(0.0, self._resume_offset / 1000.0)
             media.add_option(f":start-time={resume_seconds:.3f}")
         self._vlc_player.set_media(media)  # type: ignore[union-attr]
+        # set_media() retains the media; python-vlc never drops our reference,
+        # so release it here or every track leaks a libvlc media object.
+        try:
+            media.release()
+        except Exception:
+            pass
         self._libvlc_active_source = stream_source
         self._vlc_player.audio_set_volume(self._volume)  # type: ignore[union-attr]
         self._vlc_player.audio_set_mute(self._muted)  # type: ignore[union-attr]
@@ -1123,8 +1268,9 @@ class PlaybackPanel(wx.Panel):
                             parent=self,
                         )
                     self._libvlc_warning_shown = True
-                    self._vlc_instance = None
-                    self._vlc_player = None
+                    # A partially built instance (media_player_new() failed)
+                    # would otherwise leak its worker threads.
+                    self._release_libvlc()
                     return False
         if self._vlc_player and sys.platform.startswith("win"):
             try:
@@ -1138,15 +1284,23 @@ class PlaybackPanel(wx.Panel):
         if self._vlc_player is None or vlc is None or window is None:
             return
         try:
-            handle = window.GetHandle()
+            handle = int(window.GetHandle())
         except Exception:
             return
+        if not handle:
+            return
+        # Re-attaching the surface that is already attached tears the vout down
+        # mid-playback (_ensure_libvlc() re-runs this on every fullscreen enter).
+        cached = getattr(self, "_vlc_drawable", None)
+        if cached is not None and cached[0] is self._vlc_player and cached[1] == handle:
+            return
         if sys.platform.startswith("win"):
-            self._vlc_player.set_hwnd(int(handle))  # type: ignore[union-attr]
+            self._vlc_player.set_hwnd(handle)  # type: ignore[union-attr]
         elif sys.platform.startswith("linux"):
-            self._vlc_player.set_xwindow(int(handle))  # type: ignore[union-attr]
+            self._vlc_player.set_xwindow(handle)  # type: ignore[union-attr]
         elif sys.platform == "darwin":
-            self._vlc_player.set_nsobject(int(handle))  # type: ignore[union-attr]
+            self._vlc_player.set_nsobject(handle)  # type: ignore[union-attr]
+        self._vlc_drawable = (self._vlc_player, handle)
 
     def _schedule_libvlc_check(self, delay: int = 3000) -> None:
         self._cancel_libvlc_timer()
@@ -1160,8 +1314,29 @@ class PlaybackPanel(wx.Panel):
                 pass
         self._vlc_check = None
 
+    def _cancel_resume_timer(self) -> None:
+        timer = getattr(self, "_resume_timer", None)
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        self._resume_timer = None
+
+    def _cancel_label_restore(self) -> None:
+        timer = getattr(self, "_label_restore_timer", None)
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        self._label_restore_timer = None
+        self._label_restore_target = None
+
     def _verify_libvlc_start(self) -> None:
         self._vlc_check = None
+        if self._is_destroying():
+            return
         if self._vlc_player is None or vlc is None:
             return
         state = self._vlc_player.get_state()
@@ -1212,9 +1387,12 @@ class PlaybackPanel(wx.Panel):
         can_control = self._can_control_transport()
         can_volume = self._volume_control_available()
         has_media = self._current is not None
+        has_queue = bool(self._skip_callback)
         self._play_btn.Enable(can_control)
         self._pause_btn.Enable(can_control and not self._is_paused)
         self._stop_btn.Enable(has_media or self._mode != "stopped")
+        self._prev_btn.Enable(has_queue and has_media)
+        self._next_btn.Enable(has_queue and has_media)
         self._mute_btn.Enable(can_volume)
         self._volume_slider.Enable(can_volume)
         self._fullscreen_btn.Enable(self._mode == "libvlc")
@@ -1248,19 +1426,21 @@ class PlaybackPanel(wx.Panel):
             return
         clamped_duration = max(1, duration)
         clamped_position = max(0, min(position, clamped_duration))
-        self._seek_slider_duration = clamped_duration
         self._updating_seek_slider = True
         try:
-            if self._seek_slider.GetMax() != clamped_duration or self._seek_slider.GetMin() != 0:
-                self._seek_slider.SetRange(0, clamped_duration)
+            # Leave the range alone mid-drag: SetRange() resets the thumb, so the
+            # pending EVT_SCROLL_THUMBRELEASE would seek to the wrong position.
             if not self._seek_dragging:
+                if self._seek_slider.GetMax() != clamped_duration or self._seek_slider.GetMin() != 0:
+                    self._seek_slider.SetRange(0, clamped_duration)
                 self._seek_slider.SetValue(clamped_position)
+                self._seek_slider_duration = clamped_duration
             self._seek_slider.Enable(True)
         finally:
             self._updating_seek_slider = False
 
     def _notify_state(self) -> None:
-        if not self._state_listener:
+        if not self._state_listener or self._is_destroying():
             return
         state = self.get_state()
         wx.CallAfter(self._state_listener, state)
@@ -1324,6 +1504,8 @@ class PlaybackPanel(wx.Panel):
             self._cancel_timeline_poll()
             position = 1000 if duration else 0
             self._notify_timeline_state("playing", position, duration)
+        # Announce to screen readers without overwriting the VLC header label
+        self._announce_accessible(f"Playing: {self._current.title}", flash_label=False)
 
     def _start_timeline_poll(self, delay_ms: int = 5000) -> None:
         self._cancel_timeline_poll()
@@ -1332,6 +1514,10 @@ class PlaybackPanel(wx.Panel):
         self._timeline_timer = wx.CallLater(delay_ms, self._poll_timeline)
 
     def _maybe_seek_to_resume(self, initial: bool = False) -> None:
+        # Any call supersedes a pending retry, and drops the stale reference.
+        self._cancel_resume_timer()
+        if self._is_destroying():
+            return
         if (
             self._resume_applied
             or not self._resume_offset
@@ -1346,7 +1532,7 @@ class PlaybackPanel(wx.Panel):
             state = None
         if state not in (vlc.State.Playing, vlc.State.Paused):
             if initial:
-                wx.CallLater(100, self._maybe_seek_to_resume)
+                self._resume_timer = wx.CallLater(100, self._maybe_seek_to_resume)
             return
         try:
             current_time = int(self._vlc_player.get_time())
@@ -1393,7 +1579,9 @@ class PlaybackPanel(wx.Panel):
         frame.Raise()
         frame.SetFocus()
         video_panel.SetFocus()
-        self._pre_fullscreen_focus = wx.Window.FindFocus()
+        # Do NOT re-capture focus here: it would overwrite the pre-fullscreen
+        # window saved above with the fullscreen panel we are about to destroy,
+        # leaving nothing to restore on exit.
         self._video_panel.Hide()
         self.Layout()
         self._fullscreen_frame = frame
@@ -1418,8 +1606,14 @@ class PlaybackPanel(wx.Panel):
         self._active_video_window = self._video_panel
         self._update_vlc_drawable(self._video_panel)
         self._video_panel.Show()
-        if self._pre_fullscreen_focus and self._pre_fullscreen_focus.IsOk():
-            wx.CallAfter(self._pre_fullscreen_focus.SetFocus)
+        restore_focus = getattr(self, "_pre_fullscreen_focus", None)
+        # The fullscreen panel/frame are about to be destroyed, so never queue a
+        # SetFocus() on them: the CallAfter would run on a deleted C++ object.
+        if restore_focus is panel or restore_focus is frame:
+            restore_focus = None
+        self._pre_fullscreen_focus = restore_focus
+        if restore_focus:
+            wx.CallAfter(self._restore_focus, restore_focus)
         self.SetFocus()
         self.Layout()
         if panel:
@@ -1434,6 +1628,14 @@ class PlaybackPanel(wx.Panel):
         self._update_controls_enabled()
         self._notify_state()
         return True
+
+    def _restore_focus(self, window: wx.Window) -> None:
+        """Focus a window that may have been destroyed since it was queued."""
+        try:
+            if window:
+                window.SetFocus()
+        except RuntimeError:
+            pass
 
     def _on_fullscreen_close(self, event: wx.CloseEvent) -> None:
         self._exit_fullscreen()
@@ -1456,6 +1658,8 @@ class PlaybackPanel(wx.Panel):
 
     def _poll_timeline(self) -> None:
         self._timeline_timer = None
+        if self._is_destroying():
+            return
         if not self._current or self._mode != "libvlc" or self._vlc_player is None or vlc is None:
             return
         try:
@@ -1511,6 +1715,51 @@ class PlaybackPanel(wx.Panel):
         self._last_timeline_state = None
         self._last_timeline_position = 0
         self._reset_seek_slider()
+
+    def _announce_accessible(self, message: str, *, flash_label: bool = True) -> None:
+        """Announce a status change to screen readers.
+
+        Uses the wx.Accessible API when available, falling back to a
+        transient header label change that NVDA will detect.
+
+        Set ``flash_label=False`` to only fire the accessible event
+        without modifying the header label (use when the label is already
+        correct and should not be overwritten).
+        """
+        try:
+            accessible = self._header.GetAccessible()
+            if accessible:
+                accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_NAMECHANGE, 0, wx.ACC_SELF)
+        except Exception:
+            pass
+        if not flash_label:
+            return
+        # Transient label flash for visual + accessibility fallback. If a flash is
+        # already pending, restore to the label it was going to restore to -- the
+        # currently displayed text is the previous announcement, not the real state.
+        pending_target = getattr(self, "_label_restore_target", None)
+        self._cancel_label_restore()
+        prev_label = pending_target if pending_target is not None else self._header.GetLabel()
+        if prev_label != message:
+            self._header.SetLabel(message)
+            self._label_restore_target = prev_label
+            self._label_restore_timer = wx.CallLater(2500, self._restore_header_label, prev_label, message)
+
+    def _restore_header_label(self, label: str, message: Optional[str] = None) -> None:
+        self._label_restore_timer = None
+        self._label_restore_target = None
+        try:
+            current = self._header.GetLabel()
+            # Only undo our own flash. If stop(), a new item or a failure has set
+            # the header since, that label is authoritative and must not be
+            # replaced by the state we flashed over.
+            if message is not None:
+                if current == message:
+                    self._header.SetLabel(label)
+            elif current != label:
+                self._header.SetLabel(label)
+        except Exception:
+            pass
 
     def _show_libvlc(self, visible: bool) -> None:
         self._video_panel.Show(visible)

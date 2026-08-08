@@ -10,6 +10,7 @@ from plexapi.base import PlexObject
 from plexapi.library import Folder, LibrarySection
 
 from ..plex_service import MusicAlphaBucket, MusicCategory, MusicRadioOption
+from .content_panel import name_control
 
 
 @dataclass
@@ -36,7 +37,11 @@ class NavigationTree(wx.TreeCtrl):
         **kwargs,
     ) -> None:
         super().__init__(parent, style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT, *args, **kwargs)
+        # A native SysTreeView32 ignores SetName for MSAA purposes, so NVDA
+        # announced a bare "tree view". Keep the accessible referenced.
+        self._accessible = name_control(self, "Library Navigation", "tree")
         self._loader = loader
+        self._music_label_style: str = "none"
         self._on_selection = on_selection
         self._root = self.AddRoot("root")
         self._destroyed = False
@@ -45,8 +50,10 @@ class NavigationTree(wx.TreeCtrl):
         self._queue_index_map: Dict[int, wx.TreeItemId] = {}
         self._queue_selected_index: int = -1
         self._queue_saved_index: int = -1
+        self._queue_collapsed: bool = False
         self._loading_nodes: Set[str] = set()
         self.Bind(wx.EVT_TREE_ITEM_EXPANDING, self._handle_expanding)
+        self.Bind(wx.EVT_TREE_ITEM_COLLAPSED, self._handle_collapsed)
         self.Bind(wx.EVT_TREE_SEL_CHANGED, self._handle_selection)
         self.Bind(wx.EVT_WINDOW_DESTROY, self._handle_destroy)
 
@@ -129,7 +136,8 @@ class NavigationTree(wx.TreeCtrl):
                 continue
             self._queue_index_map[idx] = item
         try:
-            self.Expand(root)
+            if not self._queue_collapsed:
+                self.Expand(root)
         except RuntimeError:
             pass
         previous_saved = self._queue_saved_index
@@ -195,6 +203,9 @@ class NavigationTree(wx.TreeCtrl):
         if self._destroyed:
             return
         payload = self._payload(item)
+        # Track when the user manually expands the queue root
+        if payload and payload.kind == "queue_root":
+            self._queue_collapsed = False
         if not payload or not payload.plex_object:
             return
         if payload.kind == "placeholder":
@@ -202,6 +213,14 @@ class NavigationTree(wx.TreeCtrl):
         if not self._has_placeholder(item):
             return
         self._populate_children(item, payload.plex_object)
+
+    def _handle_collapsed(self, event: wx.TreeEvent) -> None:
+        item = event.GetItem()
+        if self._destroyed:
+            return
+        payload = self._payload(item)
+        if payload and payload.kind == "queue_root":
+            self._queue_collapsed = True
 
     def _populate_children(self, item: wx.TreeItemId, plex_object: object) -> None:
         if self._destroyed:
@@ -240,6 +259,10 @@ class NavigationTree(wx.TreeCtrl):
         if self._queue_root and self._queue_root.IsOk():
             try:
                 self.SetItemBold(self._queue_root, True)
+                self.SetItemBackgroundColour(
+                    self._queue_root,
+                    wx.SystemSettings.GetColour(wx.SYS_COLOUR_INFOBK),
+                )
             except RuntimeError:
                 pass
         return self._queue_root
@@ -322,6 +345,25 @@ class NavigationTree(wx.TreeCtrl):
             "photoalbum",
             "collection",
         } or isinstance(plex_object, (LibrarySection, Folder))
+
+    def set_music_label_style(self, style: str) -> None:
+        """Set how music type prefixes appear: 'emoji', 'text', or 'none'."""
+        if style in ("emoji", "text", "none"):
+            self._music_label_style = style
+
+    def _format_music_label(self, label: str, child_type: str) -> str:
+        """Apply the configured music label style to a tree label."""
+        emoji_map = {"artist": "🎤", "album": "💿", "track": "♪"}
+        text_map = {"artist": "Artist:", "album": "Album:", "track": "Track:"}
+        if self._music_label_style == "emoji":
+            prefix = emoji_map.get(child_type, "")
+        elif self._music_label_style == "text":
+            prefix = text_map.get(child_type, "")
+        else:
+            prefix = ""
+        if prefix:
+            return f"{prefix} {label}"
+        return label
 
     def expand_with_focus(self, item: wx.TreeItemId) -> None:
         if self._destroyed or not item or not item.IsOk():
@@ -483,6 +525,15 @@ class NavigationTree(wx.TreeCtrl):
             child = children[index]
             child_type = getattr(child, "type", "") or ("folder" if isinstance(child, Folder) else "item")
             label = getattr(child, "title", None) or getattr(child, "label", None) or str(child)
+            # Add type context for music items to distinguish albums from tracks
+            if child_type == "track":
+                label = self._format_music_label(label, "track")
+            elif child_type == "artist":
+                label = self._format_music_label(label, "artist")
+            elif child_type == "album":
+                label = self._format_music_label(label, "album")
+            elif child_type == "track":
+                label = self._format_music_label(label, "track")
             try:
                 child_item = self.AppendItem(item, label, data=self._wrap(child_type, child))
             except RuntimeError:
