@@ -1,9 +1,9 @@
 {
-  "version": "1.39.5",
-  "asset": "Plexible-v1.39.5.zip",
-  "download_url": "https://github.com/serrebidev/Plexible/releases/download/v1.39.5/Plexible-v1.39.5.zip",
-  "sha256": "6d64fe8ee011e34964d2bb0688bcdef3b33bdc0d65121b95a8b230ad4b68922e",
-  "published_at": "2026-04-29T22:04:37.398316+00:00",
-  "notes": "## Other\n- Preserve v1.39.4 release artifacts",
+  "version": "1.40.2",
+  "asset": "Plexible-v1.40.2.zip",
+  "download_url": "https://github.com/serrebidev/Plexible/releases/download/v1.40.2/Plexible-v1.40.2.zip",
+  "sha256": "2ccb5bc5638a69b4e2cca1758e81c2c79b74bc68f36fc07916dd6c23f2821122",
+  "published_at": "2026-08-08T16:02:57.310467+00:00",
+  "notes": "## Fixes\n- Fix keyboard tab order and a batch of correctness bugs",
   "signing_thumbprint": "FB99DDCECA07B170E0A950F0C780AD899D28D770"
 }
