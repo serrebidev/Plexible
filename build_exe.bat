@@ -297,6 +297,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem macOS on a GitHub runner, Linux over SSH (no-op on GitHub Actions).
+call %PYTHON_CMD% "%ROOT_DIR%tools\release_other_platforms.py" v%NEXT_VERSION%
+if errorlevel 1 (
+    echo Linux/macOS assets failed. Rerun: python tools\release_other_platforms.py v%NEXT_VERSION%
+    popd >nul
+    exit /b 1
+)
+
 echo.
 echo Release v%NEXT_VERSION% created successfully.
 popd >nul

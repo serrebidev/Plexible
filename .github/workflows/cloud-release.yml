@@ -1,6 +1,6 @@
 name: Cloud Release
 
-# Cloud agents ONLY. On the Windows release host run `build_exe.bat release`.
+# Muse agent and cloud agents ONLY. On the Windows release host run `build_exe.bat release`.
 # Windows runs the same build_exe.bat on a GitHub runner, signed with the
 # release certificate from the WINDOWS_CODESIGN_PFX/PASSWORD secrets (the one
 # plex_client/updater.py pins), so version, notes, commit, tag and release are
