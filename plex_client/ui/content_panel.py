@@ -9,7 +9,15 @@ from plexapi.base import PlexObject
 from ..plex_service import PlayableMedia
 
 
-class NamedAccessible(wx.Accessible):
+# wx.Accessible (MSAA) exists only on Windows: on GTK and macOS its constructor
+# and wx.Window.SetAccessible raise NotImplementedError, and those toolkits
+# expose control names to the screen reader natively. Make both no-ops there.
+_HAS_MSAA = wx.Platform == "__WXMSW__"
+if not _HAS_MSAA:
+    wx.Window.SetAccessible = lambda self, accessible: None
+
+
+class NamedAccessible(wx.Accessible if _HAS_MSAA else object):
     """Simple accessible wrapper that exposes a constant name and role.
 
     Use this on wx.Panel and other containers so NVDA reads a meaningful

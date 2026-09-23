@@ -25,6 +25,11 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 - **wxPython Issues**: Collecting all submodules for `wx` ensures UI stability but may trigger deprecation warnings (e.g., `wx.lib.pubsub`). These are expected and don't halt the build.
 - **Hidden Imports**: Standard libraries like `concurrent.futures`, `urllib3`, and `ctypes`, plus `requests` dependencies (`certifi`, `idna`, `charset_normalizer`) should be explicitly listed to ensure they are available in the frozen bundle.
 
+## Build & Release
+- Local releases (this Windows host) stay Windows-only: `build_exe.bat release` (see BUILD.md).
+- Cloud agents ONLY: `.github/workflows/cloud-release.yml` builds every platform on GitHub runners. Windows runs the same `build_exe.bat release`, signed from the `WINDOWS_CODESIGN_PFX`/`WINDOWS_CODESIGN_PASSWORD` secrets (thumbprint `FB99DDCECA07B170E0A950F0C780AD899D28D770`, pinned in `plex_client/updater.py`); the job fails unless `Plexible.exe` is signed by that cert. macOS (`Plexible-vX.Y.Z-macos.zip`) and Linux (`Plexible-vX.Y.Z-linux-x86_64.tar.gz`) then build the tag with `build.sh` and attach. Both need VLC installed by the user. `gh workflow run cloud-release.yml -f dry_run=true` builds all three as artifacts, publishes nothing; `-f dry_run=false` is real. Watch: `gh run watch <id> --exit-status`. Never run it while `build_exe.bat release` runs (both bump from the latest tag). It replaced the old `codex-release.yml`, which signed with a throwaway cert.
+- `wx.Accessible` exists only on Windows; `content_panel.py` turns `SetAccessible`/`NamedAccessible` into no-ops elsewhere (GTK raised NotImplementedError at startup). Test Linux over `ssh root@serrebiradio.com` (Debian 13, distro `python3-wxgtk4.0` in a `--system-site-packages` venv, `xvfb-run`).
+
 ## Instructions for Future Agents
 - **Build Quality**: Always fix any warnings, bugs, or errors encountered during the build process when possible. Do not ignore or skip over them.
 - **Testing**: When adding features, test within the frozen environment context (check `sys.frozen`) as path resolution for `config.json` and assets changes.

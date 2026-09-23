@@ -7,3 +7,4 @@ dist/** linguist-generated=true
 *.toc linguist-generated=true
 *.pkg linguist-generated=true
 *.zip filter=lfs diff=lfs merge=lfs -text
+*.sh text eol=lf

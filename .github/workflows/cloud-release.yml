@@ -1,0 +1,178 @@
+name: Cloud Release
+
+# Cloud agents ONLY. On the Windows release host run `build_exe.bat release`.
+# Windows runs the same build_exe.bat on a GitHub runner, signed with the
+# release certificate from the WINDOWS_CODESIGN_PFX/PASSWORD secrets (the one
+# plex_client/updater.py pins), so version, notes, commit, tag and release are
+# what the local release makes. macOS and Linux then build that tag with
+# build.sh and attach their packages.
+#
+#   gh workflow run cloud-release.yml -f dry_run=true    # build all, publish nothing
+#   gh workflow run cloud-release.yml -f dry_run=false   # real release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build every platform as workflow artifacts; push, tag and publish nothing
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plexible-release
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      ref: ${{ steps.tag.outputs.ref }}
+    steps:
+      - name: Require main
+        if: ${{ github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::Cloud releases run from main only (got ${{ github.ref }})."
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install build dependencies
+        run: python -m pip install pyinstaller pytest -r requirements.txt
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Import code-signing certificate and locate signtool
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+        run: |
+          if (-not $env:PFX_BASE64) { throw "WINDOWS_CODESIGN_PFX secret is missing" }
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force)
+          Remove-Item $pfx -Force
+          "SIGN_CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+          $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $tool) { throw "signtool.exe not found" }
+          "SIGNTOOL_PATH=$($tool.FullName)" >> $env:GITHUB_ENV
+
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        shell: cmd
+        run: |
+          call build_exe.bat dry-run || exit /b 1
+          call build_exe.bat build
+
+      - name: Release
+        if: ${{ !inputs.dry_run }}
+        shell: cmd
+        run: call build_exe.bat release
+
+      # The updater pins this certificate; never ship anything else.
+      - name: Verify Authenticode signature
+        run: |
+          $sig = Get-AuthenticodeSignature dist\Plexible\Plexible.exe
+          if ($sig.SignerCertificate.Thumbprint -ne $env:SIGN_CERT_THUMBPRINT) { throw "Plexible.exe is not signed by the release certificate ($($sig.Status))" }
+          if ("$($sig.Status)" -notin @("Valid", "UnknownError", "NotTrusted")) { throw "Signature is $($sig.Status)" }
+          "Signed: $($sig.Status)"
+
+      - name: Record tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            tag="$(git describe --tags --exact-match HEAD)"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "ref=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: Plexible-windows
+          path: |
+            release/Plexible-v*.zip
+            release/Plexible-update.json
+          if-no-files-found: error
+
+  unix:
+    needs: windows
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            asset: Plexible-macos.zip
+          - os: ubuntu-24.04
+            asset: Plexible-linux-x86_64.tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.windows.outputs.ref }}
+
+      - uses: actions/setup-python@v6
+        if: ${{ runner.os == 'macOS' }}
+        with:
+          python-version: "3.14"
+
+      # wxPython has no Linux pip wheel; use Ubuntu's in a venv that sees it.
+      - name: Prepare Linux Python
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv python3-wxgtk4.0 libvlc5 vlc-plugin-base xvfb
+          python3 -m venv --system-site-packages .venv
+          echo "PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Launch check
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          set +e
+          HOME="$RUNNER_TEMP" timeout 12 xvfb-run -a dist/Plexible/Plexible
+          [ $? = 124 ] || { echo "::error::Plexible exited before 12 s"; exit 1; }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: ${{ !inputs.dry_run }}
+        run: |
+          tag="${{ needs.windows.outputs.tag }}"
+          ext="${{ matrix.asset }}"; ext="${ext#Plexible-}"
+          name="Plexible-${tag}-$ext"
+          cp "dist/${{ matrix.asset }}" "$name"
+          gh release upload "$tag" "$name" --clobber --repo "$GITHUB_REPOSITORY"

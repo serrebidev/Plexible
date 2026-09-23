@@ -120,3 +120,12 @@ coll = COLLECT(
     upx_exclude=[],
     name='Plexible',
 )
+
+# macOS: app bundle (build.sh zips it). VLC comes from /Applications/VLC.app.
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='Plexible.app',
+        bundle_identifier='com.serrebidev.plexible',
+        info_plist={'NSHighResolutionCapable': True},
+    )

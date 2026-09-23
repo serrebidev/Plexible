@@ -33,5 +33,7 @@ Draft releases are not allowed for Plexible.
 - After a release, verify that the latest release has `draft == false` and that
   no release returned by the GitHub Releases API is a draft.
 
-The `Codex Release` GitHub Actions workflow follows this policy and still uses
-`build_exe.bat release` as the release command.
+Cloud agents release with the `Cloud Release` workflow (`cloud-release.yml`),
+which runs `build_exe.bat release` on a GitHub Windows runner and adds macOS
+and Linux builds made with `build.sh`. On this Windows host use
+`build_exe.bat release`.
