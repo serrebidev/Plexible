@@ -10,7 +10,7 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 - **Bootstrap Mechanism**: `main.py` contains a `_evaluate_runtime_requirements` function that checks for missing modules at startup and attempts to auto-install them via `pip` if they are missing or broken.
 
 ### VLC Integration & Playback
-- **LibVLC Bootstrapping**: `plex_client/ui/playback.py` handles a complex VLC environment setup. It looks for local VLC installations or **automatically downloads a portable VLC version** (3.0.20) to `LOCALAPPDATA/Plexible/vlc` if no system VLC is found.
+- **LibVLC Bootstrapping**: `plex_client/ui/playback.py` looks for local VLC installations or downloads the current stable portable VLC from VideoLAN's update feed to `LOCALAPPDATA/Plexible/vlc`. `PLEXIBLE_VLC_VERSION` overrides discovery; 3.0.24 is the offline fallback.
 - **Playback Modes**: Primarily uses `libvlc` for integrated playback within the UI. It handles both HLS and Direct streams.
 - **Fallback Sources**: LibVLC startup tries multiple candidate stream URLs (direct then fallback/HLS) before giving up.
 

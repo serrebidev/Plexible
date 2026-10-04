@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import importlib
 import os
+import re
 import shutil
 import zipfile
 import struct
@@ -32,11 +33,27 @@ class QueueNodePayload:
 
 
 _LIBVLC_BOOTSTRAPPED = False
-_PORTABLE_VLC_VERSION = "3.0.20"
-_PORTABLE_VLC_URLS = {
-    "win32": f"https://get.videolan.org/vlc/{_PORTABLE_VLC_VERSION}/win32/vlc-{_PORTABLE_VLC_VERSION}-win32.zip",
-    "win64": f"https://get.videolan.org/vlc/{_PORTABLE_VLC_VERSION}/win64/vlc-{_PORTABLE_VLC_VERSION}-win64.zip",
-}
+_PORTABLE_VLC_VERSION = "3.0.24"  # Current stable fallback when the update feed is offline.
+
+
+def _portable_vlc_version(arch: str) -> str:
+    override = os.environ.get("PLEXIBLE_VLC_VERSION")
+    if override:
+        if not re.fullmatch(r"\d+\.\d+\.\d+", override):
+            raise ValueError("PLEXIBLE_VLC_VERSION must contain three numeric version components")
+        return override
+    try:
+        response = requests.get(
+            f"https://update.videolan.org/vlc/status-{'win-x64' if arch == 'win64' else 'win'}",
+            timeout=5,
+        )
+        response.raise_for_status()
+        version = response.text.splitlines()[0].strip()
+        if re.fullmatch(r"\d+\.\d+\.\d+", version):
+            return version
+    except (requests.RequestException, IndexError):
+        pass
+    return _PORTABLE_VLC_VERSION
 
 
 def _portable_vlc_base_dir() -> Path:
@@ -55,16 +72,17 @@ def _locate_extracted_libvlc(root: Path) -> Optional[Path]:
 
 
 def _ensure_portable_vlc(arch: str) -> Optional[Path]:
-    if arch not in _PORTABLE_VLC_URLS:
+    if arch not in ("win32", "win64"):
         return None
     base_dir = _portable_vlc_base_dir()
     if not base_dir:
         return None
-    target_dir = base_dir / arch / f"vlc-{_PORTABLE_VLC_VERSION}-{arch}"
+    version = _portable_vlc_version(arch)
+    target_dir = base_dir / arch / f"vlc-{version}-{arch}"
     lib_dir = _locate_extracted_libvlc(target_dir) if target_dir.exists() else None
     if lib_dir and (lib_dir / "libvlc.dll").exists():
         return lib_dir
-    url = _PORTABLE_VLC_URLS[arch]
+    url = f"https://get.videolan.org/vlc/{version}/{arch}/vlc-{version}-{arch}.zip"
     target_dir.mkdir(parents=True, exist_ok=True)
     tmp_zip = target_dir / "vlc.zip"
     try:

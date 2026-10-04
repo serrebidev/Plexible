@@ -1,5 +1,5 @@
-wxPython>=4.2
+wxPython>=4.3.1
 plexapi @ git+https://github.com/pushingkarmaorg/python-plexapi
-python-vlc
-requests
-tzdata
+python-vlc>=3.0.21203
+requests>=2.34.2
+tzdata>=2026.5
