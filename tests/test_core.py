@@ -183,3 +183,36 @@ class TestSearchCompatibility:
 
         assert len(results) == 1
         assert captured == {"query": "matrix", "maxresults": 7}
+
+
+def test_failed_timeline_is_not_reported_as_confirmed_progress(plex_service):
+    from plex_client.plex_service import PlayableMedia
+
+    item = MagicMock()
+    item.duration = 60000
+    item.viewOffset = 12000
+    item.updateTimeline.side_effect = RuntimeError("offline")
+    media = PlayableMedia("Movie", "movie", "/library/metadata/1", "", None, 12000, item)
+    with pytest.raises(RuntimeError, match="offline"):
+        plex_service.update_timeline(media, "paused", 20000, 60000)
+
+
+def test_failed_progress_reload_does_not_fabricate_confirmation(plex_service):
+    from plex_client.plex_service import PlayableMedia
+
+    item = MagicMock()
+    item.duration = 60000
+    item.viewOffset = 12000
+    item.reload.side_effect = RuntimeError("offline")
+    media = PlayableMedia("Movie", "movie", "/library/metadata/1", "", None, 12000, item)
+    assert plex_service.update_timeline(media, "paused", 20000, 60000) == ("paused", 0)
+
+
+def test_zero_server_progress_does_not_confirm_local_position(plex_service):
+    from plex_client.plex_service import PlayableMedia
+
+    item = MagicMock()
+    item.duration = 60000
+    item.viewOffset = 0
+    media = PlayableMedia("Movie", "movie", "/library/metadata/1", "", None, 0, item)
+    assert plex_service.update_timeline(media, "playing", 20000, 60000) == ("playing", 0)

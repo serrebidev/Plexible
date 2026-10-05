@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import threading
 import zipfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -118,20 +121,48 @@ def _env_thumbprints() -> Tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _extract_manifest_thumbprints(manifest: dict) -> Tuple[str, ...]:
-    raw = manifest.get("signing_thumbprints") or manifest.get("signing_thumbprint")
-    if isinstance(raw, str):
-        return (raw,)
-    if isinstance(raw, list):
-        return tuple(str(item).strip() for item in raw if item)
-    return ()
+def _win_verify_trust(exe_path: Path) -> int:
+    """Get the native verification error, without UI or online revocation checks.
+
+    PowerShell collapses untrusted roots and invalid signatures to UnknownError.
+    Only CERT_E_UNTRUSTEDROOT may be ignored for an explicitly pinned publisher.
+    """
+    class GUID(ctypes.Structure):
+        _fields_ = [("data", ctypes.c_ubyte * 16)]
+
+    class FileInfo(ctypes.Structure):
+        _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR),
+                    ("hFile", wintypes.HANDLE), ("pgKnownSubject", ctypes.POINTER(GUID))]
+
+    class TrustData(ctypes.Structure):
+        _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
+                    ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wintypes.DWORD),
+                    ("fdwRevocationChecks", wintypes.DWORD), ("dwUnionChoice", wintypes.DWORD),
+                    ("pFile", ctypes.POINTER(FileInfo)), ("dwStateAction", wintypes.DWORD),
+                    ("hWVTStateData", wintypes.HANDLE), ("pwszURLReference", wintypes.LPCWSTR),
+                    ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
+                    ("pSignatureSettings", ctypes.c_void_p)]
+
+    action = GUID.from_buffer_copy(uuid.UUID("00aac56b-cd44-11d0-8cc2-00c04fc295ee").bytes_le)
+    file_info = FileInfo(cbStruct=ctypes.sizeof(FileInfo), pcwszFilePath=str(exe_path.resolve()))
+    data = TrustData(cbStruct=ctypes.sizeof(TrustData), dwUIChoice=2, dwUnionChoice=1,
+                     pFile=ctypes.pointer(file_info), dwStateAction=1, dwProvFlags=0x1010)
+    verify = ctypes.WinDLL("wintrust").WinVerifyTrust
+    verify.argtypes = [wintypes.HWND, ctypes.POINTER(GUID), ctypes.POINTER(TrustData)]
+    verify.restype = wintypes.LONG
+    try:
+        return int(verify(None, ctypes.byref(action), ctypes.byref(data))) & 0xFFFFFFFF
+    finally:
+        data.dwStateAction = 2  # WTD_STATEACTION_CLOSE releases provider state.
+        verify(None, ctypes.byref(action), ctypes.byref(data))
 
 
 def _verify_authenticode(exe_path: Path, allowed_thumbprints: Iterable[str]) -> None:
     allowed = set(_normalize_thumbprints(allowed_thumbprints))
+    literal_path = str(exe_path).replace("'", "''")
     command = (
         "$sig = Get-AuthenticodeSignature -LiteralPath "
-        f"'{exe_path}'; "
+        f"'{literal_path}'; "
         "$thumb = $null; "
         "if ($sig.SignerCertificate) { $thumb = $sig.SignerCertificate.Thumbprint }; "
         "$obj = [pscustomobject]@{ Status = $sig.Status.ToString(); StatusMessage = $sig.StatusMessage; Thumbprint = $thumb }; "
@@ -153,10 +184,15 @@ def _verify_authenticode(exe_path: Path, allowed_thumbprints: Iterable[str]) -> 
     status = str(data.get("Status") or "").strip()
     status_message = str(data.get("StatusMessage") or "").strip()
     thumbprint = _normalize_thumbprint(data.get("Thumbprint"))
-    if status.lower() == "valid":
-        return
     if thumbprint and thumbprint in allowed:
-        return
+        if status.lower() in {"valid", "nottrusted"}:
+            return
+        if status.lower() == "unknownerror":
+            try:
+                if _win_verify_trust(exe_path) == 0x800B0109:  # CERT_E_UNTRUSTEDROOT
+                    return
+            except (OSError, AttributeError) as exc:
+                raise UpdateError(f"Unable to verify the update signature: {exc}") from exc
     message = f"Authenticode status was {status or 'Unknown'}."
     if status_message:
         message = f"{message} {status_message}"
@@ -234,10 +270,11 @@ class UpdateManager:
         detail = f"Update available: v{info.version} (current v{current_version})."
         if notes:
             detail = f"{detail}\n\nRelease notes:\n{notes}"
-        if not self._is_frozen():
+        if not self._is_frozen() or sys.platform != "win32":
             detail = (
-                f"{detail}\n\nAutomatic updates are available only in the packaged app."
-                f"\nDownload: {info.download_url}"
+                f"{detail}\n\nAutomatic updates are available only in the packaged Windows app."
+                f"\nDownload the package for your operating system: "
+                f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
             )
             self._show_message(detail)
             return
@@ -297,8 +334,8 @@ class UpdateManager:
         self._parent.Close(True)
 
     def _download_and_stage(self, info: UpdateInfo) -> tuple[Path, Path]:
-        if not self._is_frozen():
-            raise UpdateError("Updates can only be installed from the packaged app.")
+        if not self._is_frozen() or sys.platform != "win32":
+            raise UpdateError("Updates can only be installed from the packaged Windows app.")
 
         update_root = _get_update_root()
         download_dir = update_root / "downloads"
@@ -372,9 +409,8 @@ class UpdateManager:
         sha256 = str(manifest.get("sha256") or "").strip()
         published_at = str(manifest.get("published_at") or release.get("published_at") or "").strip()
         notes = str(manifest.get("notes") or "").strip()
-        manifest_thumbprints = _extract_manifest_thumbprints(manifest)
         allowed_thumbprints = _normalize_thumbprints(
-            list(TRUSTED_SIGNING_THUMBPRINTS) + list(_env_thumbprints()) + list(manifest_thumbprints)
+            list(TRUSTED_SIGNING_THUMBPRINTS) + list(_env_thumbprints())
         )
 
         tag_version = _normalize_version(tag_name)

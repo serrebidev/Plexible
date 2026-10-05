@@ -25,6 +25,12 @@ class ConfigStore:
         self._migrate_legacy_config()
 
     def _resolve_config_dir(self) -> Path:
+        override = os.environ.get("PLEXIBLE_CONFIG_DIR")
+        if override:
+            # An explicit profile must not silently load another account's file.
+            directory = Path(override).resolve()
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
         candidates = list(self._iter_candidate_dirs())
         for candidate in candidates:
             config_path = candidate / self.CONFIG_FILENAME
@@ -61,6 +67,8 @@ class ConfigStore:
         return None
 
     def _migrate_legacy_config(self) -> None:
+        if os.environ.get("PLEXIBLE_CONFIG_DIR"):
+            return
         legacy_path = self.LEGACY_DIR / self.CONFIG_FILENAME
         if not legacy_path.exists():
             return
@@ -68,7 +76,7 @@ class ConfigStore:
             return
         try:
             legacy_data = json.loads(legacy_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeError):
             return
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._config_path.write_text(json.dumps(legacy_data, indent=2), encoding="utf-8")
@@ -114,7 +122,7 @@ class ConfigStore:
         try:
             with self._config_path.open("r", encoding="utf-8") as fp:
                 data = json.load(fp)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeError):
             data = self._default_config()
         if not isinstance(data, dict):
             # A hand-edited or truncated file can hold valid JSON that is not an
@@ -267,13 +275,15 @@ class ConfigStore:
             }
             self.set("pending_progress", progress)
 
-    def remove_pending_progress(self, rating_key: str) -> None:
+    def remove_pending_progress(self, rating_key: str, *, expected: Optional[Dict[str, Any]] = None) -> bool:
         with self._lock:
             progress = self.get_pending_progress()
-            if str(rating_key) in progress:
-                del progress[str(rating_key)]
+            key = str(rating_key)
+            if key in progress and (expected is None or progress[key] == expected):
+                del progress[key]
                 self.set("pending_progress", progress)
+                return True
+            return False
 
     def clear_pending_progress(self) -> None:
         self.set("pending_progress", {})
-

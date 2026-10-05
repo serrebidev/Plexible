@@ -94,7 +94,7 @@ Plexible checks GitHub Releases for the latest tag and reads `Plexible-update.js
 It compares versions semver-style, downloads the release zip, validates its SHA-256 hash, and verifies the Authenticode signature before installing.
 Updates are applied by a helper script that waits for Plexible to exit, swaps files with a staged copy, keeps a backup for rollback, and restarts the app.
 For self-signed certificates, the updater accepts the pinned signing thumbprint if the OS trust chain is not available.
-The release manifest can include `signing_thumbprint` to allow updates signed with a specific cert, which avoids hard-coding certs in the app.
+The updater requires a pinned publisher and rejects invalid signatures. The manifest's `signing_thumbprint` is informational and cannot add a trusted publisher. For self-signed certificates reported as `UnknownError`, Windows must confirm that the error is an untrusted root, rather than a damaged or expired signature.
 
 **Controls**
 - **Help > Check for Updates...** triggers a manual check.

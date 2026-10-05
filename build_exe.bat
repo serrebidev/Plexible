@@ -226,6 +226,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if not "%DRY_RUN%"=="1" (
+    echo Verifying executable with the updater's publisher and signature checks...
+    call %PYTHON_CMD% -c "import sys; from pathlib import Path; from plex_client.updater import _verify_authenticode, TRUSTED_SIGNING_THUMBPRINTS; _verify_authenticode(Path(sys.argv[1]), TRUSTED_SIGNING_THUMBPRINTS)" "%DIST_DIR%\Plexible.exe"
+    if errorlevel 1 (
+        echo Update signature verification failed!
+        popd >nul
+        exit /b 1
+    )
+)
+
 call :create_release_zip
 if errorlevel 1 (
     popd >nul

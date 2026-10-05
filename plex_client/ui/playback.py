@@ -1698,7 +1698,8 @@ class PlaybackPanel(TransparentContainer):
             self._notify_timeline_state("paused", position, duration)
             self._start_timeline_poll()
         elif state in (vlc.State.Ended, vlc.State.Stopped):
-            self._notify_timeline_state("stopped", duration or position, duration)
+            final_position = (duration or position) if state == vlc.State.Ended else position
+            self._notify_timeline_state("stopped", final_position, duration)
             wx.CallAfter(self.stop)
         elif state == vlc.State.Error:
             self._notify_timeline_state("stopped", position, duration)

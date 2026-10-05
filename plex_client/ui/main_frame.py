@@ -1721,8 +1721,9 @@ class MainFrame(wx.Frame):
                             state,
                         )
                         print(f"[Progress] pre-play flush applied state={applied_state} offset={server_offset}")
-                        if server_offset > 0:
-                            self._config.remove_pending_progress(str(rating_key))
+                        if abs(server_offset - position) <= 2000 and self._config.remove_pending_progress(
+                            str(rating_key), expected=pending
+                        ):
                             self._last_positions[str(rating_key)] = server_offset
                 except Exception as exc:  # noqa: BLE001
                     print(f"[Progress] Unable to pre-flush {rating_key}: {exc}")
@@ -2933,30 +2934,26 @@ class MainFrame(wx.Frame):
         if not rating_key or duration <= 0:
             return
         rating_key = str(rating_key)
+        existing = self._config.get_pending_entry(rating_key)
         server_position = server_offset if server_offset and server_offset > 0 else None
         effective = max(0, position, server_position or 0)
+        prior = max(self._last_positions.get(rating_key, 0), existing.get("position", 0))
+        if prior and effective + 2000 < prior:
+            return
         if effective <= 0:
             if state == "stopped":
-                self._config.remove_pending_progress(rating_key)
+                self._config.remove_pending_progress(rating_key, expected=existing)
                 self._last_positions.pop(rating_key, None)
             return
         if effective >= int(duration * 0.97):
-            self._config.remove_pending_progress(rating_key)
+            self._config.remove_pending_progress(rating_key, expected=existing)
             self._last_positions.pop(rating_key, None)
             if not self._closing:
                 wx.CallAfter(self._schedule_queue_refresh, 600)
             return
         if server_position is not None and server_position >= max(0, effective - 2000):
-            self._config.remove_pending_progress(rating_key)
+            self._config.remove_pending_progress(rating_key, expected=existing)
             self._last_positions[rating_key] = server_position
-            return
-        existing = self._config.get_pending_progress().get(rating_key)
-        prior = max(
-            self._last_positions.get(rating_key, 0),
-            (existing or {}).get("position", 0),
-            server_position or 0,
-        )
-        if prior and effective + 2000 < prior:
             return
         if prior and effective < 1000:
             return
@@ -3009,6 +3006,9 @@ class MainFrame(wx.Frame):
         deadline = time.monotonic() + 2.5
         while self._progress_flush_active and time.monotonic() < deadline:
             time.sleep(0.05)
+        if self._progress_flush_active:
+            # Leave the in-flight snapshot on disk instead of racing another flush.
+            return
         if not self._service:
             return
         pending = self._config.get_pending_progress()
@@ -3036,7 +3036,7 @@ class MainFrame(wx.Frame):
                 continue
             print(f"[Progress] flushing {rating_key} pos={position} dur={duration} state={state}")
             if position <= 0 or duration <= 0:
-                self._config.remove_pending_progress(rating_key)
+                self._config.remove_pending_progress(rating_key, expected=payload)
                 continue
             try:
                 applied_state, server_offset = self._service.update_progress_by_key(  # type: ignore[arg-type]
@@ -3046,8 +3046,9 @@ class MainFrame(wx.Frame):
                     state,
                 )
                 print(f"[Progress] server accepted {rating_key} new state={applied_state} offset={server_offset}")
-                if server_offset > 0:
-                    self._config.remove_pending_progress(rating_key)
+                if server_offset > 0 and abs(server_offset - position) <= 2000 and self._config.remove_pending_progress(
+                    rating_key, expected=payload
+                ):
                     self._last_positions[str(rating_key)] = server_offset
                     changed = True
             except Exception as exc:  # noqa: BLE001

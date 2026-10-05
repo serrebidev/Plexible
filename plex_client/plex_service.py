@@ -810,7 +810,8 @@ class PlexService:
                     print(f"[Playlist] Unable to load playlist items via fetchItems: {exc}")
                     items = []
         hydrated = [self._ensure_item_loaded(item) for item in items]
-        self._playlist_items_cache[cache_key] = hydrated
+        if hydrated:
+            self._playlist_items_cache[cache_key] = hydrated
         return hydrated
 
     def _collection_items(self, collection: PlexObject) -> List[PlexObject]:
@@ -855,7 +856,8 @@ class PlexService:
         hydrated = [self._ensure_item_loaded(item) for item in items if item is not None]
         filtered = [item for item in hydrated if getattr(item, "type", None) != "collection"]
         result = filtered or hydrated
-        self._collection_items_cache[cache_key] = result
+        if result:
+            self._collection_items_cache[cache_key] = result
         return result
 
     def collection_items(self, collection: PlexObject) -> List[PlexObject]:
@@ -2189,6 +2191,7 @@ class PlexService:
             media.resume_offset = bounded_position
         except Exception as exc:  # noqa: BLE001
             print(f"[Timeline] Failed to update timeline: {exc}")
+            raise
         if near_completion:
             try:
                 mark = getattr(item, "markWatched", None)
@@ -2203,9 +2206,10 @@ class PlexService:
             try:
                 item.reload()
             except Exception:
-                server_offset = int(getattr(item, "viewOffset", media.resume_offset) or media.resume_offset or 0)
+                # Local state is not proof that the server saved this position.
+                server_offset = 0
                 break
-            server_offset = int(getattr(item, "viewOffset", media.resume_offset) or media.resume_offset or 0)
+            server_offset = int(getattr(item, "viewOffset", 0) or 0)
             target = max(0, bounded_position - tolerance)
             if (
                 bounded_position <= 0
@@ -2478,10 +2482,12 @@ class PlexService:
     def playlist_add_items(self, playlist: Playlist, items: List[PlexObject]) -> None:
         """Add items to an existing playlist."""
         playlist.addItems(items)
+        self._playlist_items_cache.clear()
 
     def playlist_remove_items(self, playlist: Playlist, items: List[PlexObject]) -> None:
         """Remove items from a playlist."""
         playlist.removeItems(items)
+        self._playlist_items_cache.clear()
 
     def playlist_move_item(
         self,
@@ -2496,10 +2502,12 @@ class PlexService:
             aliases={"after": ("afterItem", "after_item")},
             after=after,
         )
+        self._playlist_items_cache.clear()
 
     def playlist_delete(self, playlist: Playlist) -> None:
         """Delete a playlist."""
         playlist.delete()
+        self._playlist_items_cache.clear()
 
     def playlist_copy_to_user(self, playlist: Playlist, user: str) -> None:
         """Copy a playlist to another user."""
@@ -2554,10 +2562,12 @@ class PlexService:
     def collection_add_items(self, collection: Collection, items: List[PlexObject]) -> None:
         """Add items to a collection."""
         collection.addItems(items)
+        self._collection_items_cache.clear()
 
     def collection_remove_items(self, collection: Collection, items: List[PlexObject]) -> None:
         """Remove items from a collection."""
         collection.removeItems(items)
+        self._collection_items_cache.clear()
 
     def collection_move_item(
         self,
@@ -2572,10 +2582,12 @@ class PlexService:
             aliases={"after": ("afterItem", "after_item")},
             after=after,
         )
+        self._collection_items_cache.clear()
 
     def collection_delete(self, collection: Collection) -> None:
         """Delete a collection."""
         collection.delete()
+        self._collection_items_cache.clear()
 
     # =========================================================================
     # LIBRARY MANAGEMENT
@@ -3972,5 +3984,3 @@ class PlexService:
         """Check if a path is browsable on the server."""
         server = self.ensure_server()
         return server.isBrowsable(path)
-
-

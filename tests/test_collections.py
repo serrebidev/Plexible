@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 
 class TestCollectionFeatures:
@@ -126,3 +127,35 @@ class TestCollectionFeatures:
         plex_service.collection_delete(mock_collection)
         
         mock_collection.delete.assert_called_once()
+
+
+@pytest.mark.parametrize("operation", ["add", "remove", "move"])
+def test_collection_edit_refreshes_cached_items(plex_service, mock_collection, operation):
+    first = SimpleNamespace(title="First", type="movie", isFullObject=lambda: True)
+    second = SimpleNamespace(title="Second", type="movie", isFullObject=lambda: True)
+    contents = [first, second]
+    mock_collection.items.side_effect = lambda: list(contents)
+    assert plex_service.collection_items(mock_collection) == [first, second]
+    if operation == "add":
+        third = SimpleNamespace(title="Third", type="movie", isFullObject=lambda: True)
+        mock_collection.addItems.side_effect = lambda items: contents.extend(items)
+        plex_service.collection_add_items(mock_collection, [third])
+        expected = [first, second, third]
+    elif operation == "remove":
+        mock_collection.removeItems.side_effect = lambda items: contents.remove(items[0])
+        plex_service.collection_remove_items(mock_collection, [first])
+        expected = [second]
+    else:
+        mock_collection.moveItem.side_effect = lambda item, **kwargs: contents.reverse()
+        plex_service.collection_move_item(mock_collection, second)
+        expected = [second, first]
+    assert plex_service.collection_items(mock_collection) == expected
+
+
+def test_collection_load_retries_after_temporary_failure(plex_service, mock_collection, mock_server):
+    item = SimpleNamespace(title="Movie", type="movie", isFullObject=lambda: True)
+    mock_collection.items.side_effect = [RuntimeError("offline"), [item]]
+    mock_collection.children.return_value = []
+    mock_server.fetchItems.side_effect = RuntimeError("offline")
+    assert plex_service.collection_items(mock_collection) == []
+    assert plex_service.collection_items(mock_collection) == [item]

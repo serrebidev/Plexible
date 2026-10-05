@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 
 class TestPlaylistFeatures:
@@ -157,3 +158,34 @@ class TestPlaylistFeatures:
         plex_service.playlist_copy_to_user(mock_playlist, "friend@example.com")
         
         mock_playlist.copyToUser.assert_called_once_with("friend@example.com")
+
+
+@pytest.mark.parametrize("operation", ["add", "remove", "move"])
+def test_playlist_edit_refreshes_cached_items(plex_service, mock_playlist, operation):
+    first = SimpleNamespace(title="First", type="track", isFullObject=lambda: True)
+    second = SimpleNamespace(title="Second", type="track", isFullObject=lambda: True)
+    contents = [first, second]
+    mock_playlist.items.side_effect = lambda: list(contents)
+    assert plex_service._playlist_items(mock_playlist) == [first, second]
+    if operation == "add":
+        third = SimpleNamespace(title="Third", type="track", isFullObject=lambda: True)
+        mock_playlist.addItems.side_effect = lambda items: contents.extend(items)
+        plex_service.playlist_add_items(mock_playlist, [third])
+        expected = [first, second, third]
+    elif operation == "remove":
+        mock_playlist.removeItems.side_effect = lambda items: contents.remove(items[0])
+        plex_service.playlist_remove_items(mock_playlist, [first])
+        expected = [second]
+    else:
+        mock_playlist.moveItem.side_effect = lambda item, **kwargs: contents.reverse()
+        plex_service.playlist_move_item(mock_playlist, second)
+        expected = [second, first]
+    assert plex_service._playlist_items(mock_playlist) == expected
+
+
+def test_playlist_load_retries_after_temporary_failure(plex_service, mock_playlist, mock_server):
+    item = SimpleNamespace(title="Track", type="track", isFullObject=lambda: True)
+    mock_playlist.items.side_effect = [RuntimeError("offline"), [item]]
+    mock_server.fetchItems.side_effect = RuntimeError("offline")
+    assert plex_service._playlist_items(mock_playlist) == []
+    assert plex_service._playlist_items(mock_playlist) == [item]

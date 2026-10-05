@@ -60,3 +60,44 @@ class TestAuthManager:
         assert hasattr(AuthManager, 'authenticate_with_browser')
         assert hasattr(AuthManager, 'load_saved_account')
         assert hasattr(AuthManager, 'sign_out')
+
+
+def test_config_override_takes_priority_over_existing_config(tmp_path, monkeypatch):
+    from plex_client.config import ConfigStore
+
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    (old_dir / "config.json").write_text('{"auth_token": "old-account"}', encoding="utf-8")
+    override = tmp_path / "new"
+    monkeypatch.setenv("PLEXIBLE_CONFIG_DIR", str(override))
+    monkeypatch.setattr(ConfigStore, "_script_directory", lambda self: old_dir)
+    monkeypatch.setattr(ConfigStore, "LEGACY_DIR", tmp_path / "legacy")
+
+    config = ConfigStore()
+    assert config.get_auth_token() is None
+    config.set_auth_token("new-account")
+    assert json.loads((override / "config.json").read_text(encoding="utf-8"))["auth_token"] == "new-account"
+    assert json.loads((old_dir / "config.json").read_text(encoding="utf-8"))["auth_token"] == "old-account"
+
+
+def test_invalid_utf8_config_recovers_with_defaults(tmp_path, monkeypatch):
+    from plex_client.config import ConfigStore
+
+    monkeypatch.setenv("PLEXIBLE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_bytes(b"\xff\xfe")
+    config = ConfigStore()
+    assert config.get_auth_token() is None
+    assert config.get_client_id()
+    config.set_auto_check_updates(False)
+    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))["auto_check_updates"] is False
+
+
+def test_explicit_profile_does_not_import_legacy_account(tmp_path, monkeypatch):
+    from plex_client.config import ConfigStore
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "config.json").write_text('{"auth_token":"legacy-account"}', encoding="utf-8")
+    monkeypatch.setattr(ConfigStore, "LEGACY_DIR", legacy)
+    monkeypatch.setenv("PLEXIBLE_CONFIG_DIR", str(tmp_path / "new-profile"))
+    assert ConfigStore().get_auth_token() is None
