@@ -35,3 +35,17 @@ Plexible is a lightweight, wxPython-based Plex client for Windows. It provides a
 - **Testing**: When adding features, test within the frozen environment context (check `sys.frozen`) as path resolution for `config.json` and assets changes.
 - **VLC Pathing**: If playback fails in a build, verify the `PYTHON_VLC_MODULE_PATH` environment variable which is set dynamically by the app.
 - **PlexAPI**: Always ensure the `plexapi` fork from `pushingkarmaorg` is used, as it contains specific fixes or features relied upon by the service layer.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in this repo's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
