@@ -328,3 +328,57 @@ def test_starting_synthetic_radio_loads_only_the_chosen_seed(plex_service, monke
     assert plex_service._start_synthetic_radio(section, "library_radio", "Library Radio") == ("media", "session")
     assert section.searchTracks.call_count == 1
     assert len(loaded) == 1
+def _letter(key, title, size):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(key=key, title=title, size=str(size))
+
+
+@pytest.mark.parametrize(
+    ("category", "type_id"), [("artists", 8), ("albums", 9), ("tracks", 10)]
+)
+def test_letter_list_is_requested_by_type_and_title(plex_service, category, type_id):
+    """libtype= is ignored by Plex; type= plus a title sort keeps sizes and items aligned."""
+    from plexapi.library import FirstCharacter
+
+    section = MagicMock()
+    section.key = 4
+    section.fetchItems.return_value = [_letter("A", "A", 3)]
+    entries = plex_service._fetch_first_character_entries(section, category)
+    assert len(entries) == 1
+    section.fetchItems.assert_called_once_with(
+        f"/library/sections/4/firstCharacter?type={type_id}&sort=titleSort", cls=FirstCharacter
+    )
+
+
+def test_letter_buckets_use_server_paths_and_real_titles(plex_service):
+    """Bare letter keys become full paths, and album letters keep their name and size."""
+    section = MagicMock()
+    section.key = 4
+    section.fetchItems.return_value = [_letter("%23", "#", 105), _letter("A", "A", 151)]
+    buckets = plex_service._music_alpha_buckets(section, "albums")
+    assert buckets[0].title == "Browse All Albums (256)"
+    assert [bucket.character for bucket in buckets[1:]] == ["#", "A"]
+    assert buckets[2].count == 151
+    assert buckets[1].key == "/library/sections/4/firstCharacter/%23?type=9&sort=titleSort"
+    assert buckets[2].key == "/library/sections/4/firstCharacter/A?type=9&sort=titleSort"
+
+
+def test_opening_a_letter_does_not_reload_each_item(plex_service, monkeypatch):
+    """One paged request opens a letter; no per-item round trip to the server."""
+    from plex_client.plex_service import MusicAlphaBucket
+
+    def fail_reload(_item):
+        raise AssertionError("letter items were reloaded one by one")
+
+    monkeypatch.setattr(plex_service, "_ensure_item_loaded", fail_reload)
+    section = MagicMock()
+    artists = [MagicMock(type="artist") for _ in range(3)]
+    section.fetchItems.return_value = artists
+    bucket = MusicAlphaBucket(
+        identifier="music:artists:A", title="A · 3 artists",
+        key="/library/sections/4/firstCharacter/A?type=8&sort=titleSort",
+        category="artists", libtype="artist", section=section, count=3, summary="", character="A",
+    )
+    assert plex_service._music_alpha_bucket_items(bucket) == artists
+    section.fetchItems.assert_called_once_with(bucket.key, container_size=1000)
