@@ -216,3 +216,115 @@ def test_zero_server_progress_does_not_confirm_local_position(plex_service):
     item.viewOffset = 0
     media = PlayableMedia("Movie", "movie", "/library/metadata/1", "", None, 0, item)
     assert plex_service.update_timeline(media, "playing", 20000, 60000) == ("playing", 0)
+
+
+def _no_waiting(monkeypatch):
+    from plex_client import plex_service as service_module
+
+    def fail_sleep(_seconds):
+        raise AssertionError("update_timeline waited for a resume point")
+
+    monkeypatch.setattr(service_module.time, "sleep", fail_sleep)
+
+
+def test_track_stop_does_not_wait_for_a_resume_point(plex_service, monkeypatch):
+    """Plex keeps no viewOffset for music tracks, so Stop must not spin for 8 s."""
+    from plex_client.plex_service import PlayableMedia
+
+    _no_waiting(monkeypatch)
+    item = MagicMock()
+    item.type = "track"
+    item.duration = 184580
+    item.viewOffset = 0
+    media = PlayableMedia("Song", "track", "/library/metadata/1", "", None, 0, item)
+    assert plex_service.update_timeline(media, "stopped", 21845, 184580) == ("paused", 21845)
+    assert item.reload.call_count == 1
+
+
+def test_track_progress_flush_confirms_so_it_is_not_resent(plex_service, mock_server, monkeypatch):
+    """A cached track position is confirmed once the server accepts it."""
+    _no_waiting(monkeypatch)
+    item = MagicMock()
+    item.type = "track"
+    item.title = "Song"
+    item.key = "/library/metadata/1"
+    item.duration = 184580
+    item.viewOffset = 0
+    mock_server.fetchItem = MagicMock(return_value=item)
+    assert plex_service.update_progress_by_key("1", 21845, 184580, "paused") == ("paused", 21845)
+
+
+def test_track_keeps_a_real_server_resume_point(plex_service, monkeypatch):
+    """When the server does keep a track offset (audiobooks), report the real value."""
+    from plex_client.plex_service import PlayableMedia
+
+    _no_waiting(monkeypatch)
+    item = MagicMock()
+    item.type = "track"
+    item.duration = 3600000
+    item.viewOffset = 600000
+    media = PlayableMedia("Chapter", "track", "/library/metadata/1", "", None, 0, item)
+    assert plex_service.update_timeline(media, "stopped", 600500, 3600000) == ("paused", 600000)
+
+
+def test_failed_track_reload_does_not_fabricate_confirmation(plex_service, monkeypatch):
+    from plex_client.plex_service import PlayableMedia
+
+    _no_waiting(monkeypatch)
+    item = MagicMock()
+    item.type = "track"
+    item.duration = 184580
+    item.viewOffset = 0
+    item.reload.side_effect = RuntimeError("offline")
+    media = PlayableMedia("Song", "track", "/library/metadata/1", "", None, 0, item)
+    assert plex_service.update_timeline(media, "stopped", 21845, 184580) == ("paused", 0)
+
+
+def test_movie_stop_still_waits_for_server_confirmation(plex_service, monkeypatch):
+    """Video keeps the confirm loop: a zero offset is not proof of a saved position."""
+    from plex_client import plex_service as service_module
+    from plex_client.plex_service import PlayableMedia
+
+    clock = iter(range(0, 1000))
+    monkeypatch.setattr(service_module.time, "time", lambda: float(next(clock)))
+    sleeps = []
+    monkeypatch.setattr(service_module.time, "sleep", sleeps.append)
+    item = MagicMock()
+    item.type = "movie"
+    item.duration = 60000
+    item.viewOffset = 0
+    media = PlayableMedia("Movie", "movie", "/library/metadata/1", "", None, 0, item)
+    assert plex_service.update_timeline(media, "stopped", 20000, 60000) == ("paused", 0)
+    assert sleeps, "the movie path should still poll the server"
+
+
+def test_listing_synthetic_radios_does_not_query_the_server(plex_service):
+    """Radio options are listed on every music selection; they must stay free."""
+    section = MagicMock()
+    section.librarySectionID = 3
+    options = plex_service._synthetic_radio_options(section)
+    assert [option.action for option in options] == ["library_radio", "recent_radio", "shuffle_radio"]
+    assert all(option.data["seed_rating_key"] is None for option in options)
+    section.searchTracks.assert_not_called()
+    section.recentlyAddedTracks.assert_not_called()
+
+
+def test_starting_synthetic_radio_loads_only_the_chosen_seed(plex_service, monkeypatch):
+    """The seed is picked on start from one search, without loading every candidate."""
+    tracks = []
+    for index in range(200):
+        track = MagicMock()
+        track.type = "track"
+        track.ratingKey = str(index)
+        tracks.append(track)
+    section = MagicMock()
+    section.librarySectionID = 3
+    section.searchTracks = MagicMock(return_value=tracks)
+    loaded = []
+    monkeypatch.setattr(plex_service, "_ensure_item_loaded", lambda item: loaded.append(item) or item)
+    monkeypatch.setattr(plex_service, "_create_play_queue", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(plex_service, "_initialize_radio_session", lambda queue, **kwargs: ("media", "session"))
+
+    assert plex_service._start_synthetic_radio(section, "library_radio", "Library Radio") == ("media", "session")
+    assert section.searchTracks.call_count == 1
+    assert len(loaded) == 1

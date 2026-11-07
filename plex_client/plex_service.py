@@ -1255,11 +1255,11 @@ class PlexService:
             ("recent_radio", "Recently Added Radio", "Focus on the newest music while mixing in related songs."),
             ("shuffle_radio", "Deep Shuffle Radio", "Go deep into the catalogue with an always-changing mix."),
         ]
+        # No server queries here: these options are listed every time a music item
+        # is selected or starts playing, and sampling seed tracks for all three
+        # (a 200-track library search each) saturated large libraries until every
+        # other request, Stop included, timed out. The seed is picked on start.
         for mode, label, description in descriptors:
-            seed = self._pick_synthetic_seed_track(section, mode, sample_only=True)
-            if seed is None:
-                continue
-            rating_key = getattr(seed, "ratingKey", None)
             options.append(
                 RadioOption(
                     id=f"synthetic:{mode}:{section_id}",
@@ -1267,7 +1267,7 @@ class PlexService:
                     description=description,
                     category="Stations",
                     action=f"{mode}",
-                    data={"section": section, "mode": mode, "seed_rating_key": rating_key},
+                    data={"section": section, "mode": mode, "seed_rating_key": None},
                 )
             )
         return options
@@ -1288,7 +1288,9 @@ class PlexService:
             except Exception:
                 seed = None
         if seed is None:
-            seed = self._pick_synthetic_seed_track(section, mode)
+            # Same sample the option listing used to pre-pick from; only the chosen
+            # seed is loaded in full (below), not every candidate track.
+            seed = self._pick_synthetic_seed_track(section, mode, sample_only=True)
         if not seed:
             raise RuntimeError("Unable to find music to start this radio.")
         seed = self._ensure_item_loaded(seed)
@@ -2202,6 +2204,10 @@ class PlexService:
         tolerance = 1250
         confirm_deadline = time.time() + 8.0
         server_offset = 0
+        # Plex keeps no resume point for music tracks: viewOffset stays 0 however
+        # long we wait, so the loop below would hold Stop for the full deadline
+        # and the progress would be resent forever. One reload is enough there.
+        is_track = str(getattr(item, "type", "") or "").lower() == "track"
         while True:
             try:
                 item.reload()
@@ -2210,6 +2216,12 @@ class PlexService:
                 server_offset = 0
                 break
             server_offset = int(getattr(item, "viewOffset", 0) or 0)
+            if is_track:
+                # The server accepted the update above; for a track that is all
+                # the confirmation it will ever give.
+                if server_offset <= 0 and bounded_position > 0:
+                    server_offset = bounded_position
+                break
             target = max(0, bounded_position - tolerance)
             if (
                 bounded_position <= 0
