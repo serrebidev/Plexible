@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from plexapi.base import PlexObject
 from plexapi.collection import Collection
 from plexapi.exceptions import NotFound
-from plexapi.library import Folder, LibrarySection, MusicSection, Hub
+from plexapi.library import FirstCharacter, Folder, LibrarySection, MusicSection, Hub
 from plexapi.media import MediaPart
 from plexapi.myplex import MyPlexAccount, MyPlexResource
 from plexapi.playlist import Playlist
@@ -152,6 +152,12 @@ _RADIO_DISPLAY_NAMES: Dict[str, str] = {
     "album_radio": "Album Radio",
     "track_radio": "Track Radio",
 }
+
+# Plex search type ids used by the letter (firstCharacter) endpoints.
+_MUSIC_LETTER_TYPE_IDS: Dict[str, int] = {"artists": 8, "albums": 9, "tracks": 10}
+# A letter can hold thousands of tracks. plexapi's default page of 100 turns that
+# into dozens of round trips, which takes tens of seconds on a remote server.
+_MUSIC_LETTER_PAGE_SIZE = 1000
 
 _MUSIC_CATEGORY_DEFINITIONS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -733,7 +739,10 @@ class PlexService:
             )
 
             for character in characters:
-                key = getattr(character, "key", None)
+                character_key = getattr(character, "key", None)
+                # The server gives a bare letter ("A", "%23"); fetching it as is
+                # glued it to the port ("…:32400A") and every letter failed.
+                key = self._first_character_path(section, category, character_key) if character_key else None
                 if not key:
                     continue
                 raw_title = str(getattr(character, "title", "")) or "#"
@@ -771,11 +780,14 @@ class PlexService:
                 self._music_alpha_items_cache[bucket.identifier] = items
             return items
         try:
-            items = list(bucket.section.fetchItems(bucket.key))
+            items = list(bucket.section.fetchItems(bucket.key, container_size=_MUSIC_LETTER_PAGE_SIZE))
         except Exception as exc:  # noqa: BLE001
             print(f"[MusicCategory] Unable to load items for bucket '{bucket.title}': {exc}")
             items = []
-        hydrated = [self._ensure_item_loaded(item) for item in items]
+        # The list items are enough for the tree (title, type, ratingKey); plexapi
+        # loads the details of the one item that gets selected. Reloading every
+        # item here cost one round trip each before the letter could open.
+        hydrated = list(items)
         if not hydrated:
             fallback_items = self._music_alpha_bucket_search(bucket)
             if fallback_items:
@@ -896,32 +908,33 @@ class PlexService:
                 except Exception as fallback_exc:  # noqa: BLE001
                     print(f"[MusicCategory] Secondary search failed for bucket '{bucket.title}': {fallback_exc}")
                     results = []
-        hydrated = [self._ensure_item_loaded(item) for item in results]
-        return hydrated
+        return results
+
+    @staticmethod
+    def _first_character_path(
+        section: MusicSection, category: str, character_key: Optional[str] = None
+    ) -> Optional[str]:
+        """Server path of the letter list for ``category``, or of one letter's items."""
+        section_key = str(getattr(section, "key", "") or "").strip()
+        type_id = _MUSIC_LETTER_TYPE_IDS.get(category)
+        if not section_key or type_id is None:
+            return None
+        path = f"/library/sections/{section_key}/firstCharacter"
+        if character_key:
+            path = f"{path}/{character_key}"
+        # Plex ignores libtype= here and answers with artist letters. With type=
+        # alone it counts albums and tracks by artist, so a letter's size did not
+        # match the items it returns; sorting by title makes the two agree.
+        return f"{path}?type={type_id}&sort=titleSort"
 
     def _fetch_first_character_entries(self, section: MusicSection, category: str) -> List[PlexObject]:
-        if category == "artists":
-            try:
-                return list(section.firstCharacter() or [])
-            except Exception as exc:  # noqa: BLE001
-                print(f"[MusicCategory] Unable to load artist characters: {exc}")
-                return []
-        raw_key = getattr(section, "key", None)
-        key = str(raw_key or "").strip()
-        if not key:
-            return []
-        libtype_map = {"albums": "album", "tracks": "track"}
-        libtype = libtype_map.get(category)
-        if not libtype:
+        path = self._first_character_path(section, category)
+        if not path:
             return []
         try:
-            server = self.ensure_server()
-        except Exception:
-            return []
-        path = f"/library/sections/{key}/firstCharacter?libtype={libtype}"
-        try:
-            data = server.query(path)
-            return list(section.findItems(data) or [])
+            # cls=FirstCharacter: parsed generically, album and track letters came
+            # back as Tag objects without title or size, so every letter read "#".
+            return list(section.fetchItems(path, cls=FirstCharacter) or [])
         except Exception as exc:  # noqa: BLE001
             print(f"[MusicCategory] Unable to load {category} character buckets: {exc}")
             return []
