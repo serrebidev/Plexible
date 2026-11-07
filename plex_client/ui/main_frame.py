@@ -24,6 +24,7 @@ from ..plex_service import (
     RadioSession,
     SearchHit,
 )
+from .. import screen_reader
 from ..updater import UpdateManager
 
 
@@ -905,8 +906,6 @@ class MainFrame(wx.Frame):
                 # failsafe for older builds where the dialog helpers might not exist yet
                 self._collection_dialog = None
                 self._collection_dialog_identifier = None
-        # Announce selection to screen readers before early returns
-        self._announce_selection(plex_object)
 
         if isinstance(plex_object, MusicCategory):
             self._metadata_panel.update_content(plex_object, None)
@@ -969,19 +968,6 @@ class MainFrame(wx.Frame):
             dialog.show_loading("Loading collection items...")
             self._metadata_panel.set_status_message("Collection items appear in the collection window.")
             self._load_collection_items_async(collection_candidate, collection_token, collection_identifier)
-
-    def _announce_selection(self, plex_object: Optional[object]) -> None:
-        """Announce the selected item to screen readers with a short delay."""
-        if not plex_object or not isinstance(plex_object, PlexObject):
-            return
-        title = getattr(plex_object, "title", "") or ""
-        ptype = getattr(plex_object, "type", "") or ""
-        if not title:
-            return
-        if ptype:
-            wx.CallLater(200, lambda: self._announce_screen_reader(f"{ptype}: {title}"))
-        else:
-            wx.CallLater(200, lambda: self._announce_screen_reader(title))
 
     @staticmethod
     def _radio_option_from_station(station: MusicRadioStation) -> RadioOption:
@@ -2617,7 +2603,7 @@ class MainFrame(wx.Frame):
         """Speak the current playback state via the status bar for screen readers."""
         state = self._playback_panel.get_state()
         if not state.get("has_media"):
-            self._announce_screen_reader("Nothing is playing.")
+            self._announce_screen_reader("Nothing is playing.", interrupt=True)
             return
         parts = []
         # What's playing
@@ -2639,7 +2625,7 @@ class MainFrame(wx.Frame):
         # Fullscreen
         if state.get("fullscreen"):
             parts.append("Fullscreen")
-        self._announce_screen_reader(". ".join(parts))
+        self._announce_screen_reader(". ".join(parts), interrupt=True)
 
     def _handle_player_volume_up(self, _: wx.CommandEvent) -> None:
         if not self._playback_panel.adjust_volume(5):
@@ -2784,20 +2770,15 @@ class MainFrame(wx.Frame):
                 self._status_bar.SetBackgroundColour(wx.NullColour)
             self._announce_screen_reader(message)
 
-    def _announce_screen_reader(self, message: str) -> None:
-        """Fire an accessible event on the status bar so NVDA reads the message."""
-        # Announcements are posted with CallLater and can outlive the frame; testing
-        # the deleted status bar for truth raises before the try block below.
+    def _announce_screen_reader(self, message: str, *, interrupt: bool = False) -> None:
+        """Speak ``message`` with the screen reader.
+
+        Status messages do not interrupt; answers to a key the user pressed do.
+        """
+        # Announcements are posted with CallLater and can outlive the frame.
         if self._closing or not message:
             return
-        if not self._status_bar:
-            return
-        try:
-            accessible = self._status_bar.GetAccessible()
-            if accessible:
-                accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_VALUECHANGE, 0, wx.ACC_SELF)
-        except Exception:
-            pass
+        screen_reader.speak(message, interrupt=interrupt)
 
     def _show_busy(self, message: str) -> None:
         self._clear_busy()
