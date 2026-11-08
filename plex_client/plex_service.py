@@ -773,9 +773,7 @@ class PlexService:
         if cached is not None:
             return cached
         if bucket.key == "__browse_all__":
-            items = list(
-                self._music_category_direct_items(bucket.section, bucket.category)
-            )
+            items = self._music_browse_all_items(bucket)
             if items:
                 self._music_alpha_items_cache[bucket.identifier] = items
             return items
@@ -998,6 +996,23 @@ class PlexService:
                     seen.add(identifier)
                     pairs.append((hub, item))
         return pairs
+
+    def _music_browse_all_items(self, bucket: MusicAlphaBucket) -> List[object]:
+        # "Browse All Songs (58148)" must list every item it announces. The
+        # 200-item lookup below is only a stand-in for when letters fail, and
+        # reusing it here silently cut the list after the first 200 titles.
+        try:
+            return list(
+                bucket.section.search(
+                    libtype=bucket.libtype,
+                    sort="titleSort:asc",
+                    container_size=_MUSIC_LETTER_PAGE_SIZE,
+                )
+                or []
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[MusicCategory] Unable to browse all {bucket.category}: {exc}")
+            return list(self._music_category_direct_items(bucket.section, bucket.category))
 
     def _music_category_direct_items(self, section: MusicSection, category: str) -> List[object]:
         try:
