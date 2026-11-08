@@ -2488,6 +2488,16 @@ class MainFrame(wx.Frame):
         if state == "stopped" and rating_key and not near_completion:
             self._clear_radio_session_for_key(rating_key)
 
+        # Only closing waits for the server here: the window must not go away
+        # before the position is saved. Stop and seek used to wait as well, on
+        # the GUI thread, which froze the window and silenced the screen reader
+        # for up to ~8 s whenever the server was slow or unreachable.
+        inline = self._closing
+        if state == "stopped" and bounded_position > 0:
+            # Playing the same item again right away must resume from here,
+            # even before the server has answered.
+            media.resume_offset = bounded_position
+
         def update() -> None:
             local_offset: Optional[int] = None
             applied_state = state
@@ -2508,7 +2518,7 @@ class MainFrame(wx.Frame):
                 print(f"[Timeline] Unable to update playback status: {exc}")
             finally:
                 if rating_key:
-                    if sync:
+                    if inline:
                         self._ingest_progress(rating_key, bounded_position, bounded_duration, applied_state, local_offset)
                     else:
                         wx.CallAfter(
@@ -2519,8 +2529,12 @@ class MainFrame(wx.Frame):
                             applied_state,
                             local_offset,
                         )
+                if state == "stopped" and not inline:
+                    # Refresh "Continue Watching" once the server has the new
+                    # position, not before.
+                    wx.CallAfter(self._refresh_watch_queues)
 
-        if sync or self._closing:
+        if inline:
             update()
         else:
             def worker() -> None:
@@ -2549,7 +2563,6 @@ class MainFrame(wx.Frame):
                 wx.CallAfter(self._schedule_queue_refresh, 750)
         elif state == "stopped":
             self._last_queue_play_key = None
-            wx.CallAfter(self._refresh_watch_queues)
             wx.CallAfter(self._schedule_queue_refresh, 2000)
         if rating_key:
             self._schedule_progress_flush(5000)
