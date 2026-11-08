@@ -212,7 +212,10 @@ class NavigationTree(wx.TreeCtrl):
             return
         if not self._has_placeholder(item):
             return
-        self._populate_children(item, payload.plex_object)
+        loading_key = payload.identifier or self._identify(payload.plex_object)
+        if loading_key in self._loading_nodes:
+            return
+        self._populate_children(item, payload.plex_object, loading_key)
 
     def _handle_collapsed(self, event: wx.TreeEvent) -> None:
         item = event.GetItem()
@@ -222,26 +225,51 @@ class NavigationTree(wx.TreeCtrl):
         if payload and payload.kind == "queue_root":
             self._queue_collapsed = True
 
-    def _populate_children(self, item: wx.TreeItemId, plex_object: object) -> None:
+    def _populate_children(self, item: wx.TreeItemId, plex_object: object, loading_key: str = "") -> None:
         if self._destroyed:
             return
-        try:
-            self.DeleteChildren(item)
-        except RuntimeError:
-            return
+        # Keep the "Loading..." child while the server answers. Removing it here,
+        # inside the expanding event, left Windows expanding an item with no
+        # children, so it often stayed collapsed and Right arrow had to be
+        # pressed again once the children arrived.
+        if loading_key:
+            self._loading_nodes.add(loading_key)
 
         def work() -> None:
             try:
                 children = list(self._loader(plex_object))
             except Exception as exc:  # noqa: BLE001
-                wx.CallAfter(self._show_error, item, exc)
+                wx.CallAfter(self._apply_load_error, item, exc, loading_key)
                 return
-            wx.CallAfter(self._apply_children, item, children)
+            wx.CallAfter(self._apply_children, item, children, loading_key)
 
         threading.Thread(target=work, name="PlexTreeLoader", daemon=True).start()
 
-    def _apply_children(self, item: wx.TreeItemId, children: Iterable[object]) -> None:
+    def _apply_children(self, item: wx.TreeItemId, children: Iterable[object], loading_key: str = "") -> None:
+        self._loading_nodes.discard(loading_key)
+        if self._destroyed or not item or not item.IsOk():
+            return
+        # Still open means the user is waiting on it; collapsed means they left.
+        try:
+            was_expanded = self.IsExpanded(item)
+        except RuntimeError:
+            return
         self._replace_children(item, list(children))
+        if was_expanded and item.IsOk() and self.ItemHasChildren(item):
+            try:
+                self.Expand(item)
+            except RuntimeError:
+                pass
+
+    def _apply_load_error(self, item: wx.TreeItemId, exc: Exception, loading_key: str = "") -> None:
+        self._loading_nodes.discard(loading_key)
+        if self._destroyed or not item or not item.IsOk():
+            return
+        try:
+            self.DeleteChildren(item)
+        except RuntimeError:
+            return
+        self._show_error(item, exc)
 
     def _ensure_queue_root(self) -> Optional[wx.TreeItemId]:
         if self._destroyed:
