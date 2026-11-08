@@ -120,6 +120,21 @@ class TestPlayback:
     def test_poll_reports_actual_position_unless_media_ended(self, state, expected_position, monkeypatch):
         from plex_client.ui import playback
 
+        # The player is fake, so its states must be too: on a machine with no
+        # VLC at all (a clean CI runner, or a first run before the background
+        # download finishes) playback.vlc is None, and this test must not
+        # need the real native library.
+        import enum
+
+        class _State(enum.Enum):
+            Playing = 1
+            Paused = 2
+            Stopped = 3
+            Ended = 4
+            Error = 5
+
+        monkeypatch.setattr(playback, "vlc", SimpleNamespace(State=_State))
+
         reports = []
         player = SimpleNamespace(get_state=lambda: getattr(playback.vlc.State, state), get_time=lambda: 12000)
         panel = SimpleNamespace(_timeline_timer=None, _is_destroying=lambda: False, _current=object(),
