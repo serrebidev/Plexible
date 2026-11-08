@@ -1,6 +1,6 @@
 ## Fixes
-- Screen reader announcements now actually speak: status messages and player feedback go through the NVDA controller client (status messages never interrupt; answers to keys you pressed do). Silent no-op when NVDA is not running
-- Stop music without freezing: stopping a track no longer waits for a resume point Plex never stores for tracks, and listing radio options no longer floods the server with seed queries (the seed is picked only when a radio is started)
-- Open music letters quickly: browsing artists, albums and tracks by letter now shows the right items with correct titles and counts, loaded in one paged request per letter instead of reloading every item
-- Play a music track from the beginning after Stop: Stop then Play no longer resumes a track where it stopped; movies and episodes still resume where they were left
-- Open a folder with one Right arrow press: the folder opens at once on a Loading placeholder and stays open when its items arrive, instead of sometimes needing a second press
+- List only real radio stations, fast: Music > Radios no longer treats library hubs such as "Recently added" as stations (one library showed 3,559 "stations" when it has four) and no longer reloads every entry from the server, so the list opens at once with only real stations
+- Open a playlist without reloading every track: a 58,148-track smart playlist took about 20 minutes to open because every entry was reloaded one by one; the listing is now used as-is, and the one track being played is still reloaded at play time if anything is missing
+- Browse All lists everything it announces: "Browse All Songs (58148)" showed only the first 200 songs, and the same for artists and albums; Browse All now pages through the complete list
+- Connect without waiting for addresses that never answer: connecting to a server from outside its home network took 8 seconds because startup waited for the local address to time out even though the remote address had already answered; the best-ranked address that answers is now used as soon as it is known
+- Stop a video without freezing the app: stopping a movie blocked the window for good and it had to be killed; the player is now muted, stopped and released on a background thread, and the next playback gets a fresh player
