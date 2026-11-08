@@ -482,3 +482,25 @@ def test_opening_a_playlist_does_not_reload_each_track(plex_service, monkeypatch
     assert playlist.items.call_count == 1
     assert plex_service._playlist_items(playlist) == tracks, "second open comes from the cache"
     assert playlist.items.call_count == 1
+def test_browse_all_lists_every_item_it_announces(plex_service):
+    """"Browse All Songs (58148)" used to stop after the first 200 songs."""
+    from plex_client.plex_service import MusicAlphaBucket
+
+    tracks = [MagicMock(type="track", ratingKey=str(i)) for i in range(1500)]
+    section = MagicMock()
+    section.search = MagicMock(return_value=tracks)
+    bucket = MusicAlphaBucket(
+        identifier="music:tracks:browse_all",
+        title="Browse All Songs (1500)",
+        key="__browse_all__",
+        category="tracks",
+        libtype="track",
+        section=section,
+        count=1500,
+    )
+
+    assert len(plex_service._music_alpha_bucket_items(bucket)) == 1500
+    kwargs = section.search.call_args.kwargs
+    assert kwargs["libtype"] == "track"
+    assert "maxresults" not in kwargs
+    section.searchTracks.assert_not_called()
