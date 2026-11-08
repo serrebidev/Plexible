@@ -411,3 +411,55 @@ def test_videos_still_resume_where_they_were_left(plex_service, kind):
         playable = plex_service.to_playable(node)
     assert playable.resume_offset == 15220
     node.getStreamURL.assert_called_once_with(offset=15220)
+
+
+def _hub(hub_type, items, identifier="hub"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(type=hub_type, hubIdentifier=identifier, title=identifier, context="", items=lambda: list(items))
+
+
+def _station(index):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        type="playlist",
+        key=f"/library/sections/5/stations/{index}",
+        title=f"Station {index}",
+        summary="",
+        ratingKey=None,
+        librarySectionID=5,
+    )
+
+
+def test_radios_list_only_station_hubs_without_reloading(plex_service, monkeypatch):
+    """Album hubs such as "Recently added" can hold the whole library; they are not stations."""
+    from types import SimpleNamespace
+
+    albums = [SimpleNamespace(type="album", key=f"/library/metadata/{i}", ratingKey=str(i)) for i in range(500)]
+    stations = [_station(1), _station(2)]
+    section = MagicMock()
+    section.key = 5
+    section.librarySectionID = 5
+    section.hubs = MagicMock(
+        return_value=[_hub("album", albums, "music.recent.added.5"), _hub("station", stations, "music.stations.5")]
+    )
+    section.stations = MagicMock(return_value=[])
+    monkeypatch.setattr(plex_service, "_fetch_section_station_directory", lambda section: [])
+    reloaded = []
+    monkeypatch.setattr(plex_service, "_ensure_item_loaded", lambda item: reloaded.append(item) or item)
+
+    result = plex_service._radio_stations_for_section(section)
+
+    assert [station.key for station in result] == [s.key for s in stations]
+    assert reloaded == [], "station entries are used as listed, never reloaded one by one"
+
+
+def test_station_entries_are_read_without_plexapi_auto_reload(plex_service):
+    """Reading an empty field of a partial plexapi object would query the server."""
+    from plexapi.playlist import Playlist
+
+    station = Playlist.__new__(Playlist)
+    station.__dict__.update(type="playlist", key="/library/sections/5/stations/1", _autoReload=True)
+    assert plex_service._station_key(station) == "/library/sections/5/stations/1"
+    assert station._autoReload is False
