@@ -136,6 +136,12 @@ _RADIO_KEYWORDS: Dict[str, List[str]] = {
     "track_radio": ["track radio"],
 }
 
+# Hubs of these types list library media (e.g. "Recently added" albums), never
+# radio stations; station hubs have type "station" (or "playlist" for mixes).
+_MEDIA_HUB_TYPES = frozenset(
+    {"album", "artist", "track", "clip", "movie", "show", "season", "episode", "photo", "photoalbum", "collection"}
+)
+
 _RADIO_DISPLAY_NAMES: Dict[str, str] = {
     "library_radio": "Library Radio",
     "time_travel_radio": "Time Travel Radio",
@@ -1132,6 +1138,31 @@ class PlexService:
             normalized = "station"
         return fallback, normalized
 
+    @staticmethod
+    def _disable_auto_reload(item: object) -> None:
+        # plexapi reloads a partial object from the server whenever an empty
+        # attribute is read. Station entries have empty fields (no ratingKey,
+        # often no summary), cannot be reloaded (the server answers 404) and
+        # do not need it, so reading them must stay local.
+        if isinstance(item, PlexObject):
+            item._autoReload = False
+
+    @staticmethod
+    def _is_station_hub(hub: Optional[object]) -> bool:
+        if hub is None:
+            return True
+        hub_type = str(getattr(hub, "type", "") or "").lower()
+        return hub_type not in _MEDIA_HUB_TYPES
+
+    def _is_station_item(self, item: object) -> bool:
+        self._disable_auto_reload(item)
+        item_type = str(getattr(item, "type", "") or "").lower()
+        return item_type in {"playlist", "station"}
+
+    def _station_key(self, item: object) -> Optional[str]:
+        self._disable_auto_reload(item)
+        return getattr(item, "key", None) or getattr(item, "stationKey", None)
+
     def _radio_stations_for_section(self, section: MusicSection) -> List[MusicRadioStation]:
         cache_key = self._radio_cache_key(section)
         cached = self._radio_station_cache.get(cache_key)
@@ -1143,18 +1174,23 @@ class PlexService:
         except Exception as exc:  # noqa: BLE001
             print(f"[Radio] Unable to load hubs for section {getattr(section, 'title', 'Music')}: {exc}")
             hubs = []
+        # Station entries are used as-is: playback only needs their key, and
+        # reloading them one by one is what made this list take a minute.
         station_candidates: List[Tuple[Optional[PlexObject], PlexObject]] = []
         for hub in hubs:
+            # Music hubs also list thousands of albums and artists ("Recently
+            # added" alone can hold the whole library); those are not stations.
+            if not self._is_station_hub(hub):
+                continue
             try:
                 hub_items = list(hub.items())
             except Exception as exc:  # noqa: BLE001
                 print(f"[Radio] Unable to load hub items for {getattr(hub, 'title', 'Hub')}: {exc}")
                 continue
-            if not hub_items:
-                continue
             for item in hub_items:
-                item = self._ensure_item_loaded(item)
-                key = getattr(item, "key", None) or getattr(item, "stationKey", None)
+                if not self._is_station_item(item):
+                    continue
+                key = self._station_key(item)
                 if not key:
                     continue
                 station_candidates.append((hub, item))
@@ -1164,13 +1200,13 @@ class PlexService:
             print(f"[Radio] Unable to load station listings for {getattr(section, 'title', 'Music')}: {exc}")
             fallback_playlists = []
         for playlist in fallback_playlists:
-            playlist = self._ensure_item_loaded(playlist)
+            self._disable_auto_reload(playlist)
             key = getattr(playlist, "key", None)
             if not key:
                 continue
             station_candidates.append((None, playlist))
         for item in self._fetch_section_station_directory(section):
-            item = self._ensure_item_loaded(item)
+            self._disable_auto_reload(item)
             key = getattr(item, "key", None)
             if not key:
                 continue
@@ -1178,8 +1214,9 @@ class PlexService:
 
         if not station_candidates:
             for hub_ref, item in self._fetch_radio_hub_pairs(section):
-                item = self._ensure_item_loaded(item)
-                key = getattr(item, "key", None) or getattr(item, "stationKey", None)
+                if not self._is_station_hub(hub_ref) or not self._is_station_item(item):
+                    continue
+                key = self._station_key(item)
                 if not key:
                     continue
                 station_candidates.append((hub_ref, item))
@@ -1191,7 +1228,7 @@ class PlexService:
         for hub_ref, item in station_candidates:
             # Hub entries can expose the playable key as stationKey only; without it
             # the station would be built with key=None and fail at playback time.
-            key = getattr(item, "key", None) or getattr(item, "stationKey", None)
+            key = self._station_key(item)
             rating_key = getattr(item, "ratingKey", None)
             dedupe_key = str(rating_key or key or "")
             if not key or not dedupe_key or dedupe_key in seen_keys:
