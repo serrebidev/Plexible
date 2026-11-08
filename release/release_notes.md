@@ -1,6 +1,2 @@
-## Fixes
-- List only real radio stations, fast: Music > Radios no longer treats library hubs such as "Recently added" as stations (one library showed 3,559 "stations" when it has four) and no longer reloads every entry from the server, so the list opens at once with only real stations
-- Open a playlist without reloading every track: a 58,148-track smart playlist took about 20 minutes to open because every entry was reloaded one by one; the listing is now used as-is, and the one track being played is still reloaded at play time if anything is missing
-- Browse All lists everything it announces: "Browse All Songs (58148)" showed only the first 200 songs, and the same for artists and albums; Browse All now pages through the complete list
-- Connect without waiting for addresses that never answer: connecting to a server from outside its home network took 8 seconds because startup waited for the local address to time out even though the remote address had already answered; the best-ranked address that answers is now used as soon as it is known
-- Stop a video without freezing the app: stopping a movie blocked the window for good and it had to be killed; the player is now muted, stopped and released on a background thread, and the next playback gets a fresh player
+## New
+- French interface: Plexible can now be used in French. It follows the Windows display language, and Help > Language lets you choose English or French explicitly; choosing a language offers a restart and applies on the next start if you decline. Menu shortcut keys are spoken in the interface language too. Thanks to math65 (PR #16).
