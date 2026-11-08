@@ -8,6 +8,7 @@ import shutil
 import zipfile
 import struct
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
@@ -996,12 +997,36 @@ class PlaybackPanel(TransparentContainer):
         self._cancel_libvlc_timer()
         self._cancel_resume_timer()
         self._detach_libvlc_events()
-        if self._vlc_player:
+        player = self._vlc_player
+        if player is not None:
+            # Stopping a video blocks until VLC has closed its picture in our
+            # window, and that window can only answer once this (GUI) thread
+            # is free again: stop() called here froze the app for good. The
+            # old player is stopped and released on a worker thread instead,
+            # and the next playback gets a fresh one.
+            self._vlc_player = None
+            self._vlc_drawable = None
+            threading.Thread(
+                target=_stop_and_release_player,
+                args=(player,),
+                name="LibVLCStop",
+                daemon=True,
+            ).start()
+        self._libvlc_check_attempts = 0
+
+    def _new_vlc_player(self) -> None:
+        try:
+            self._vlc_player = self._vlc_instance.media_player_new()  # type: ignore[union-attr]
+        except Exception:
+            self._vlc_player = None
+            return
+        self._vlc_drawable = None
+        if sys.platform.startswith("win"):
             try:
-                self._vlc_player.stop()
+                self._vlc_player.audio_output_set("directsound")
             except Exception:
                 pass
-        self._libvlc_check_attempts = 0
+        self._update_vlc_drawable(self._active_video_window)
 
     def _release_libvlc(self) -> None:
         """Release the player/instance so LibVLC's worker threads shut down."""
@@ -1141,6 +1166,9 @@ class PlaybackPanel(TransparentContainer):
         return "HLS" if "m3u8" in url.lower() else "Direct"
 
     def _start_libvlc(self, stream_source: str) -> bool:
+        if self._vlc_instance is not None and self._vlc_player is None:
+            # A failed candidate was just stopped; retry on a fresh player.
+            self._new_vlc_player()
         if self._vlc_instance is None or self._vlc_player is None:
             return False
         descriptor = self._describe_stream_source(stream_source)
@@ -1274,6 +1302,10 @@ class PlaybackPanel(TransparentContainer):
                 vlc = importlib.import_module("vlc")
             except Exception:
                 return False
+        if self._vlc_instance is not None and self._vlc_player is None:
+            # Stop hands the previous player to a worker thread; keep the
+            # instance (plugins already loaded) and only make a new player.
+            self._new_vlc_player()
         if self._vlc_instance is None or self._vlc_player is None:
             try:
                 instance_args = ["--no-video-title-show", "--quiet"]
@@ -1907,3 +1939,23 @@ class PlaybackPanel(TransparentContainer):
         except OSError as exc:
             return False, str(exc)
         return True, None
+
+
+def _stop_and_release_player(player: object) -> None:
+    """Silence, stop and free a LibVLC player off the GUI thread.
+
+    Closing a video read from the middle of a remote file can take ~10 s;
+    muting first keeps the old sound from running on meanwhile.
+    """
+    try:
+        player.audio_set_mute(True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        player.stop()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        player.release()  # type: ignore[attr-defined]
+    except Exception:
+        pass
