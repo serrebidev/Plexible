@@ -155,3 +155,53 @@ class TestStartOffset:
         media = self._media(kind, 5045)
         assert PlaybackPanel._start_offset(media) == 5045
         assert media.resume_offset == 5045
+
+
+def test_stopping_libvlc_never_blocks_the_gui_thread():
+    """stop() on a video froze the app: VLC waits for the window this thread runs."""
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from plex_client.ui import playback
+
+    release_stop = threading.Event()
+    stopped = threading.Event()
+    player = MagicMock()
+    player.stop.side_effect = lambda: release_stop.wait(5)
+    player.release.side_effect = stopped.set
+    panel = SimpleNamespace(
+        _vlc_player=player,
+        _vlc_drawable=(player, 1),
+        _libvlc_check_attempts=3,
+        _cancel_libvlc_timer=lambda: None,
+        _cancel_resume_timer=lambda: None,
+        _detach_libvlc_events=lambda: None,
+    )
+
+    playback.PlaybackPanel._stop_libvlc_only(panel)  # returns while stop() is still blocked
+
+    assert panel._vlc_player is None, "the next playback gets a fresh player"
+    assert panel._vlc_drawable is None
+    assert not stopped.is_set()
+    release_stop.set()
+    assert stopped.wait(5), "the old player is still stopped and released"
+    player.audio_set_mute.assert_called_once_with(True)
+
+
+def test_start_after_stop_uses_a_new_player():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from plex_client.ui import playback
+
+    fresh = MagicMock()
+    instance = MagicMock()
+    instance.media_player_new.return_value = fresh
+    panel = SimpleNamespace(
+        _vlc_instance=instance,
+        _vlc_player=None,
+        _vlc_drawable=None,
+        _active_video_window=None,
+        _update_vlc_drawable=lambda window: None,
+    )
+    playback.PlaybackPanel._new_vlc_player(panel)
+    assert panel._vlc_player is fresh
