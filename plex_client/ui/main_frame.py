@@ -13,6 +13,8 @@ from plexapi.server import PlexServer
 
 from ..auth import AuthError, AuthManager
 from ..config import ConfigStore
+from .. import i18n
+from ..i18n import N_, _, ngettext
 from ..plex_service import (
     MusicAlphaBucket,
     MusicCategory,
@@ -27,6 +29,65 @@ from ..plex_service import (
 from .. import screen_reader
 from ..updater import UpdateManager
 
+# Plex type codes -> labels shown to the user (translated where displayed).
+_TYPE_LABELS: Dict[str, str] = {
+    "movie": N_("Movie"),
+    "show": N_("Show"),
+    "season": N_("Season"),
+    "episode": N_("Episode"),
+    "artist": N_("Artist"),
+    "album": N_("Album"),
+    "track": N_("Track"),
+    "photo": N_("Photo"),
+    "photoalbum": N_("Photo Album"),
+    "playlist": N_("Playlist"),
+    "collection": N_("Collection"),
+    "clip": N_("Clip"),
+    "tag": N_("Tag"),
+    "genre": N_("Genre"),
+    "director": N_("Director"),
+    "actor": N_("Actor"),
+    "unknown": N_("Unknown"),
+}
+
+
+# Lower-case fragments that pick the status bar tint. The status text is
+# translated, so the French wording of the same messages is listed too.
+# "connecté à"/"connecté en tant que" rather than "connecté", which would also
+# match "Déconnecté.".
+_STATUS_SUCCESS_CUES: Tuple[str, ...] = (
+    "connected", "ready", "signed in", "streaming",
+    "connecté à", "connecté en tant que", "prêt", "lecture de ",
+)
+_STATUS_PROGRESS_CUES: Tuple[str, ...] = (
+    "connecting", "loading", "signing", "retrying", "searching",
+    "connexion à", "connexion au", "chargement", "connexion en cours",
+    "nouvelle tentative", "recherche en cours",
+)
+_STATUS_ERROR_CUES: Tuple[str, ...] = (
+    "error", "failed", "unable", "cannot",
+    "erreur", "échec", "impossible",
+)
+
+
+def _type_label(media_type: str) -> str:
+    """Return the user-facing label for a Plex type code."""
+    label = _TYPE_LABELS.get(media_type)
+    if label:
+        return _(label)
+    return media_type.replace("_", " ").title()
+
+
+def _localise_stock_buttons(dialog: wx.Dialog) -> None:
+    """Give the OK/Cancel buttons wx creates for stock dialogs translated labels."""
+    for button_id, label in ((wx.ID_OK, _("OK")), (wx.ID_CANCEL, _("Cancel"))):
+        try:
+            button = dialog.FindWindow(button_id)
+            if button is not None:
+                button.SetLabel(label)
+        except Exception:
+            pass
+
 
 class SearchResultsDialog(wx.Dialog):
     """Dialog that streams search results as they arrive."""
@@ -34,7 +95,7 @@ class SearchResultsDialog(wx.Dialog):
     def __init__(self, parent: wx.Window, query: str) -> None:
         self._status_message = ""
         self._status_bar: Optional[wx.StatusBar] = None
-        super().__init__(parent, title=f"Search: {query}", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        super().__init__(parent, title=_("Search: {query}", query=query), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self._hits: List[SearchHit] = []
         self._errors: List[str] = []
         self._finished = False
@@ -46,17 +107,17 @@ class SearchResultsDialog(wx.Dialog):
         self._last_running_status_count = 0
         self._last_running_status_time = 0.0
 
-        heading = wx.StaticText(self, label=f"Results for '{query}':")
-        heading.SetName("Search Results Heading")
+        heading = wx.StaticText(self, label=_("Results for '{query}':", query=query))
+        heading.SetName(_("Search Results Heading"))
         self._list = wx.ListBox(self)
-        self._list.SetName("Search Results")
-        self._status = wx.StaticText(self, label="Searching remote Plex servers…")
-        self._status.SetName("Search Status")
+        self._list.SetName(_("Search Results"))
+        self._status = wx.StaticText(self, label=_("Searching remote Plex servers…"))
+        self._status.SetName(_("Search Status"))
         self._status_message = self._status.GetLabel()
 
-        self._open_button = wx.Button(self, wx.ID_OK, "Open")
+        self._open_button = wx.Button(self, wx.ID_OK, _("Open"))
         self._open_button.Enable(False)
-        cancel_button = wx.Button(self, wx.ID_CANCEL, "Close")
+        cancel_button = wx.Button(self, wx.ID_CANCEL, _("Close"))
 
         button_sizer = wx.StdDialogButtonSizer()
         button_sizer.AddButton(self._open_button)
@@ -129,7 +190,7 @@ class SearchResultsDialog(wx.Dialog):
             return
         self._last_running_status_count = count
         self._last_running_status_time = now
-        self._set_status_label(f"{count} result(s) so far.")
+        self._set_status_label(ngettext("{count} result so far.", "{count} results so far.", count))
 
     def _schedule_flush(self) -> None:
         if self._closed:
@@ -190,12 +251,17 @@ class SearchResultsDialog(wx.Dialog):
         self._finished = True
         self._errors = errors
         if self._hits:
-            message = f"Finished. {len(self._hits)} result(s)."
+            message = ngettext("Finished. {count} result.", "Finished. {count} results.", len(self._hits))
         else:
-            message = "Finished. No results found."
+            message = _("Finished. No results found.")
             self._open_button.Enable(False)
         if errors:
-            message = f"{message} {len(errors)} server issue(s)."
+            message = ngettext(
+                "{message} {count} server issue.",
+                "{message} {count} server issues.",
+                len(errors),
+                message=message,
+            )
         self._set_status_label(message)
 
     def finish_with_error(self, message: str) -> None:
@@ -205,22 +271,22 @@ class SearchResultsDialog(wx.Dialog):
         self._flush_pending_hits()
         self._finished = True
         self._errors = [message]
-        self._set_status_label(f"Error: {message}")
+        self._set_status_label(_("Error: {message}", message=message))
         self._open_button.Enable(False)
 
-    def _on_open(self, _: wx.CommandEvent) -> None:
+    def _on_open(self, _event: wx.CommandEvent) -> None:
         if self.selected_hit is not None:
             self.EndModal(wx.ID_OK)
         else:
             wx.Bell()
 
-    def _on_cancel(self, _: wx.CommandEvent) -> None:
+    def _on_cancel(self, _event: wx.CommandEvent) -> None:
         self.EndModal(wx.ID_CANCEL)
 
     def _on_window_close(self, event: wx.CloseEvent) -> None:
         self.EndModal(wx.ID_CANCEL)
 
-    def _on_activate(self, _: wx.CommandEvent) -> None:
+    def _on_activate(self, _event: wx.CommandEvent) -> None:
         if self.selected_hit is not None:
             self.EndModal(wx.ID_OK)
 
@@ -262,7 +328,7 @@ class CollectionItemsDialog(wx.Dialog):
     ) -> None:
         super().__init__(
             parent,
-            title="Collection",
+            title=_("Collection"),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
         )
         self._on_play = on_play
@@ -270,30 +336,30 @@ class CollectionItemsDialog(wx.Dialog):
         self._on_close = on_close
         self._items: List[PlexObject] = []
 
-        heading = wx.StaticText(self, label="Collection Items")
-        heading.SetName("Collection Heading")
+        heading = wx.StaticText(self, label=_("Collection Items"))
+        heading.SetName(_("Collection Heading"))
         heading_font = heading.GetFont()
         heading_font.SetPointSize(heading_font.GetPointSize() + 2)
         heading_font.SetWeight(wx.FONTWEIGHT_BOLD)
         heading.SetFont(heading_font)
 
-        self._status = wx.StaticText(self, label="Loading collection...")
-        self._status.SetName("Collection Status")
+        self._status = wx.StaticText(self, label=_("Loading collection..."))
+        self._status.SetName(_("Collection Status"))
         self._status.Wrap(520)
 
         self._list = wx.ListBox(
             self,
             style=wx.LB_SINGLE | wx.BORDER_THEME,
         )
-        self._list.SetName("Collection Items")
+        self._list.SetName(_("Collection Items"))
 
-        self._focus_button = wx.Button(self, wx.ID_ANY, label="Focus in Navigation")
-        self._focus_button.SetName("Focus in Navigation")
+        self._focus_button = wx.Button(self, wx.ID_ANY, label=_("Focus in Navigation"))
+        self._focus_button.SetName(_("Focus in Navigation"))
         self._focus_button.Disable()
-        play_button = wx.Button(self, wx.ID_ANY, label="Play")
-        play_button.SetName("Play Collection Item")
+        play_button = wx.Button(self, wx.ID_ANY, label=_("Play"))
+        play_button.SetName(_("Play Collection Item"))
         play_button.Disable()
-        close_button = wx.Button(self, wx.ID_CLOSE, label="Close")
+        close_button = wx.Button(self, wx.ID_CLOSE, label=_("Close"))
 
         self._focus_button.Bind(wx.EVT_BUTTON, self._handle_focus)
         play_button.Bind(wx.EVT_BUTTON, self._handle_play_click)
@@ -322,8 +388,8 @@ class CollectionItemsDialog(wx.Dialog):
 
     def set_collection_title(self, collection: PlexObject) -> None:
         title = getattr(collection, "title", None)
-        heading = title.strip() if isinstance(title, str) else "Collection"
-        self.SetTitle(f"Collection: {heading}")
+        heading = title.strip() if isinstance(title, str) else _("Collection")
+        self.SetTitle(_("Collection: {title}", title=heading))
 
     def show_loading(self, message: str) -> None:
         self._status.SetLabel(message)
@@ -354,13 +420,13 @@ class CollectionItemsDialog(wx.Dialog):
             labels.append("  ·  ".join(parts))
         self._list.Set(labels)
         count = len(self._items)
-        summary = f"{count} item{'s' if count != 1 else ''}."
+        summary = ngettext("{count} item.", "{count} items.", count)
         self._status.SetLabel(summary)
         if self._items:
             self._list.SetSelection(0)
         self._update_button_state()
 
-    def _handle_selection_changed(self, _: wx.CommandEvent) -> None:
+    def _handle_selection_changed(self, _event: wx.CommandEvent) -> None:
         self._update_button_state()
 
     def _handle_item_activated(self, event: wx.CommandEvent) -> None:
@@ -376,17 +442,17 @@ class CollectionItemsDialog(wx.Dialog):
                 return
         event.Skip()
 
-    def _handle_play_click(self, _: wx.CommandEvent) -> None:
+    def _handle_play_click(self, _event: wx.CommandEvent) -> None:
         item = self._item_for_index(self._list.GetSelection())
         if item:
             self._on_play(item)
 
-    def _handle_focus(self, _: wx.CommandEvent) -> None:
+    def _handle_focus(self, _event: wx.CommandEvent) -> None:
         item = self._item_for_index(self._list.GetSelection())
         if item:
             self._on_focus_request(item)
 
-    def _handle_close_button(self, _: wx.CommandEvent) -> None:
+    def _handle_close_button(self, _event: wx.CommandEvent) -> None:
         self.Close()
 
     def _handle_close_window(self, event: wx.CloseEvent) -> None:
@@ -409,11 +475,11 @@ class RadioChooserDialog(wx.Dialog):
     """Dialog for selecting a radio station option."""
 
     def __init__(self, parent: wx.Window, options: Iterable[RadioOption]) -> None:
-        super().__init__(parent, title="Choose Radio Station", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        super().__init__(parent, title=_("Choose Radio Station"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self._options: List[RadioOption] = list(options)
 
-        heading = wx.StaticText(self, label="Select a radio station:")
-        heading.SetName("Radio Station Heading")
+        heading = wx.StaticText(self, label=_("Select a radio station:"))
+        heading.SetName(_("Radio Station Heading"))
 
         self._list = wx.ListBox(self, style=wx.LB_SINGLE | wx.BORDER_THEME)
         labels = []
@@ -423,19 +489,19 @@ class RadioChooserDialog(wx.Dialog):
             else:
                 labels.append(option.label)
         self._list.Set(labels)
-        self._list.SetName("Radio Stations")
+        self._list.SetName(_("Radio Stations"))
 
-        desc_label = wx.StaticText(self, label="Description:")
+        desc_label = wx.StaticText(self, label=_("Description:"))
         self._description = wx.TextCtrl(
             self,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_NO_VSCROLL | wx.BORDER_NONE,
         )
         self._description.SetMinSize((260, 110))
-        self._description.SetName("Station Description")
+        self._description.SetName(_("Station Description"))
 
-        self._start_button = wx.Button(self, wx.ID_OK, "Start")
+        self._start_button = wx.Button(self, wx.ID_OK, _("Start"))
         self._start_button.Enable(False)
-        cancel_button = wx.Button(self, wx.ID_CANCEL, "Cancel")
+        cancel_button = wx.Button(self, wx.ID_CANCEL, _("Cancel"))
 
         button_sizer = wx.StdDialogButtonSizer()
         button_sizer.AddButton(self._start_button)
@@ -457,7 +523,7 @@ class RadioChooserDialog(wx.Dialog):
         self._list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_activate)
         self._list.Bind(wx.EVT_CHAR_HOOK, self._on_list_char)
         self._start_button.Bind(wx.EVT_BUTTON, self._on_start)
-        cancel_button.Bind(wx.EVT_BUTTON, lambda _: self.EndModal(wx.ID_CANCEL))
+        cancel_button.Bind(wx.EVT_BUTTON, lambda _event: self.EndModal(wx.ID_CANCEL))
 
     @property
     def selected_option(self) -> Optional[RadioOption]:
@@ -473,11 +539,11 @@ class RadioChooserDialog(wx.Dialog):
         else:
             self._description.SetValue("")
 
-    def _on_select(self, _: wx.CommandEvent) -> None:
+    def _on_select(self, _event: wx.CommandEvent) -> None:
         self._start_button.Enable(True)
         self._update_description()
 
-    def _on_activate(self, _: wx.CommandEvent) -> None:
+    def _on_activate(self, _event: wx.CommandEvent) -> None:
         if self.selected_option is not None:
             self.EndModal(wx.ID_OK)
         else:
@@ -492,7 +558,7 @@ class RadioChooserDialog(wx.Dialog):
             return
         event.Skip()
 
-    def _on_start(self, _: wx.CommandEvent) -> None:
+    def _on_start(self, _event: wx.CommandEvent) -> None:
         if self.selected_option is not None:
             self.EndModal(wx.ID_OK)
         else:
@@ -505,6 +571,7 @@ from .content_panel import (
 )
 from .navigation import NavigationTree
 from .playback import PlaybackPanel, SEEK_STEP_MS
+from .wx_language import menu_shortcut
 
 
 class MainFrame(wx.Frame):
@@ -513,10 +580,18 @@ class MainFrame(wx.Frame):
     _account: Optional[MyPlexAccount] = None
     _service: Optional[PlexService] = None
 
-    def __init__(self, config: ConfigStore, auth_manager: AuthManager) -> None:
+    def __init__(
+        self,
+        config: ConfigStore,
+        auth_manager: AuthManager,
+        on_restart_requested: Optional[Callable[[], None]] = None,
+    ) -> None:
         super().__init__(None, title="Plexible", size=(1200, 800))
         self._config = config
         self._auth = auth_manager
+        # Called when the user asks for a restart (language change). The caller
+        # relaunches Plexible once this window has fully closed.
+        self._on_restart_requested = on_restart_requested
         self._update_manager = UpdateManager(self, config, status_callback=self._set_status)
         self._service: Optional[PlexService] = None
         self._account: Optional[MyPlexAccount] = None
@@ -557,14 +632,14 @@ class MainFrame(wx.Frame):
         self._build_menu()
 
         splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
-        splitter.SetAccessible(NamedAccessible("Main Splitter", "pane"))
+        splitter.SetAccessible(NamedAccessible(_("Main Splitter"), "pane"))
         # TransparentContainer, not wx.Panel: a plain panel keeps the focus itself
         # whenever every child is hidden or disabled, which puts an unlabelled
         # "pane" in the Tab cycle. These only ever host other controls.
         left_panel = TransparentContainer(splitter)
-        left_panel.SetAccessible(NamedAccessible("Navigation Panel", "pane"))
+        left_panel.SetAccessible(NamedAccessible(_("Navigation Panel"), "pane"))
         right_panel = TransparentContainer(splitter)
-        right_panel.SetAccessible(NamedAccessible("Content Panel", "pane"))
+        right_panel.SetAccessible(NamedAccessible(_("Content Panel"), "pane"))
 
         self._nav_tree = NavigationTree(
             left_panel,
@@ -578,15 +653,15 @@ class MainFrame(wx.Frame):
         left_panel.SetSizer(left_sizer)
 
         right_splitter = wx.SplitterWindow(right_panel, style=wx.SP_LIVE_UPDATE)
-        right_splitter.SetAccessible(NamedAccessible("Content Splitter", "pane"))
+        right_splitter.SetAccessible(NamedAccessible(_("Content Splitter"), "pane"))
         top_splitter = wx.SplitterWindow(right_splitter, style=wx.SP_LIVE_UPDATE)
-        top_splitter.SetAccessible(NamedAccessible("Metadata Splitter", "pane"))
+        top_splitter.SetAccessible(NamedAccessible(_("Metadata Splitter"), "pane"))
         self._metadata_panel = MetadataPanel(
             top_splitter,
             on_play=self._start_playback,
             on_radio=self._handle_radio_action,
         )
-        self._metadata_panel.set_status_message("Connecting...")
+        self._metadata_panel.set_status_message(_("Connecting..."))
         self._queues_panel = QueuesPanel(
             top_splitter,
             on_play=self._start_playback,
@@ -610,7 +685,7 @@ class MainFrame(wx.Frame):
         right_sizer = wx.BoxSizer(wx.VERTICAL)
         right_sizer.Add(right_splitter, 1, wx.EXPAND)
         right_panel.SetSizer(right_sizer)
-        self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
+        self._queues_panel.show_placeholders(_("Sign in to see your queue."), _("Sign in to see your queue."))
 
         splitter.SplitVertically(left_panel, right_panel, sashPosition=320)
         splitter.SetMinimumPaneSize(180)
@@ -634,43 +709,44 @@ class MainFrame(wx.Frame):
     def _build_menu(self) -> None:
         menu_bar = wx.MenuBar()
         file_menu = wx.Menu()
-        self._signin_item = file_menu.Append(wx.ID_ANY, "Sign In...\tCtrl+I")
-        self._signout_item = file_menu.Append(wx.ID_ANY, "Sign Out")
+        self._signin_item = file_menu.Append(wx.ID_ANY, _("Sign In...") + menu_shortcut("Ctrl+I"))
+        self._signout_item = file_menu.Append(wx.ID_ANY, _("Sign Out"))
         file_menu.AppendSeparator()
-        self._refresh_item = file_menu.Append(wx.ID_REFRESH, "Refresh Libraries\tF5")
-        self._search_item = file_menu.Append(wx.ID_FIND, "Global Search...\tCtrl+F")
-        self._change_server_item = file_menu.Append(wx.ID_ANY, "Change Server...")
+        self._refresh_item = file_menu.Append(wx.ID_REFRESH, _("Refresh Libraries") + menu_shortcut("F5"))
+        self._search_item = file_menu.Append(wx.ID_FIND, _("Global Search...") + menu_shortcut("Ctrl+F"))
+        self._change_server_item = file_menu.Append(wx.ID_ANY, _("Change Server..."))
         file_menu.AppendSeparator()
-        exit_item = file_menu.Append(wx.ID_EXIT, "Exit\tCtrl+Q")
-        menu_bar.Append(file_menu, "&File")
+        exit_item = file_menu.Append(wx.ID_EXIT, _("Exit") + menu_shortcut("Ctrl+Q"))
+        menu_bar.Append(file_menu, _("&File"))
 
         player_menu = wx.Menu()
-        self._player_play_item = player_menu.Append(wx.ID_ANY, "Play\tSpace")
-        self._player_pause_item = player_menu.Append(wx.ID_ANY, "Pause\tShift+Space")
-        self._player_stop_item = player_menu.Append(wx.ID_STOP, "Stop\tCtrl+S")
-        self._player_prev_track_item = player_menu.Append(wx.ID_ANY, "Previous Track\tCtrl+[")
-        self._player_next_track_item = player_menu.Append(wx.ID_ANY, "Next Track\tCtrl+]")
+        self._player_play_item = player_menu.Append(wx.ID_ANY, _("Play") + menu_shortcut("Space"))
+        self._player_pause_item = player_menu.Append(wx.ID_ANY, _("Pause") + menu_shortcut("Shift+Space"))
+        self._player_stop_item = player_menu.Append(wx.ID_STOP, _("Stop") + menu_shortcut("Ctrl+S"))
+        self._player_prev_track_item = player_menu.Append(wx.ID_ANY, _("Previous Track") + menu_shortcut("Ctrl+["))
+        self._player_next_track_item = player_menu.Append(wx.ID_ANY, _("Next Track") + menu_shortcut("Ctrl+]"))
         player_menu.AppendSeparator()
-        self._player_rewind_item = player_menu.Append(wx.ID_ANY, "Rewind 10s\tCtrl+Left")
-        self._player_fast_forward_item = player_menu.Append(wx.ID_ANY, "Fast Forward 10s\tCtrl+Right")
+        self._player_rewind_item = player_menu.Append(wx.ID_ANY, _("Rewind 10s") + menu_shortcut("Ctrl+Left"))
+        self._player_fast_forward_item = player_menu.Append(wx.ID_ANY, _("Fast Forward 10s") + menu_shortcut("Ctrl+Right"))
         player_menu.AppendSeparator()
-        self._player_volume_up_item = player_menu.Append(wx.ID_ANY, "Volume Up\tCtrl+Up")
-        self._player_volume_down_item = player_menu.Append(wx.ID_ANY, "Volume Down\tCtrl+Down")
-        self._player_fullscreen_item = player_menu.AppendCheckItem(wx.ID_ANY, "Fullscreen\tF11")
-        self._player_mute_item = player_menu.AppendCheckItem(wx.ID_ANY, "Mute\tCtrl+0")
+        self._player_volume_up_item = player_menu.Append(wx.ID_ANY, _("Volume Up") + menu_shortcut("Ctrl+Up"))
+        self._player_volume_down_item = player_menu.Append(wx.ID_ANY, _("Volume Down") + menu_shortcut("Ctrl+Down"))
+        self._player_fullscreen_item = player_menu.AppendCheckItem(wx.ID_ANY, _("Fullscreen") + menu_shortcut("F11"))
+        self._player_mute_item = player_menu.AppendCheckItem(wx.ID_ANY, _("Mute") + menu_shortcut("Ctrl+0"))
         player_menu.AppendSeparator()
-        self._player_announce_item = player_menu.Append(wx.ID_ANY, "Announce Playback State\tCtrl+Shift+A")
-        menu_bar.Append(player_menu, "&Player")
+        self._player_announce_item = player_menu.Append(wx.ID_ANY, _("Announce Playback State") + menu_shortcut("Ctrl+Shift+A"))
+        menu_bar.Append(player_menu, _("&Player"))
         self._player_menu = player_menu
 
         help_menu = wx.Menu()
-        self._dark_mode_item = help_menu.AppendCheckItem(wx.ID_ANY, "Dark Mode\tCtrl+Shift+D")
+        self._dark_mode_item = help_menu.AppendCheckItem(wx.ID_ANY, _("Dark Mode") + menu_shortcut("Ctrl+Shift+D"))
         self._dark_mode_item.Check(self._config.get_ui_theme() == "dark")
+        help_menu.AppendSubMenu(self._build_language_menu(), _("La&nguage"))
         help_menu.AppendSeparator()
-        self._check_updates_item = help_menu.Append(wx.ID_ANY, "Check for Updates...")
-        self._auto_update_item = help_menu.AppendCheckItem(wx.ID_ANY, "Automatically Check for Updates")
+        self._check_updates_item = help_menu.Append(wx.ID_ANY, _("Check for Updates..."))
+        self._auto_update_item = help_menu.AppendCheckItem(wx.ID_ANY, _("Automatically Check for Updates"))
         self._auto_update_item.Check(self._update_manager.is_auto_check_enabled())
-        menu_bar.Append(help_menu, "&Help")
+        menu_bar.Append(help_menu, _("&Help"))
 
         self.SetMenuBar(menu_bar)
 
@@ -679,7 +755,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._handle_refresh, self._refresh_item)
         self.Bind(wx.EVT_MENU, self._handle_search, self._search_item)
         self.Bind(wx.EVT_MENU, self._handle_change_server, self._change_server_item)
-        self.Bind(wx.EVT_MENU, lambda _: self.Close(True), exit_item)
+        self.Bind(wx.EVT_MENU, lambda _event: self.Close(True), exit_item)
         self.Bind(wx.EVT_MENU, self._handle_player_play, self._player_play_item)
         self.Bind(wx.EVT_MENU, self._handle_player_pause, self._player_pause_item)
         self.Bind(wx.EVT_MENU, self._handle_player_stop, self._player_stop_item)
@@ -718,20 +794,59 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
-    def _handle_check_updates(self, _: wx.CommandEvent) -> None:
+    def _handle_check_updates(self, _event: wx.CommandEvent) -> None:
         self._update_manager.check_for_updates(interactive=True)
+
+    def _build_language_menu(self) -> wx.Menu:
+        menu = wx.Menu()
+        current = self._config.get_language()
+        if current not in i18n.SUPPORTED_LANGUAGES:
+            current = i18n.SYSTEM_LANGUAGE
+        choices = [(i18n.SYSTEM_LANGUAGE, _("System Default"))]
+        # Language names stay in their own language so anyone can find theirs.
+        choices += list(i18n.SUPPORTED_LANGUAGES.items())
+        for code, label in choices:
+            item = menu.AppendRadioItem(wx.ID_ANY, label)
+            item.Check(code == current)
+            self.Bind(wx.EVT_MENU, lambda _event, code=code: self._handle_language_choice(code), item)
+        return menu
+
+    def _handle_language_choice(self, code: str) -> None:
+        if code == self._config.get_language():
+            return
+        self._config.set_language(code)
+        if i18n.resolve_language(code) == i18n.get_language():
+            return
+        # Menus and panels are built once, so the new language applies on restart.
+        # Ask in the chosen language: that is the one the user reads.
+        catalog = i18n.load_catalog(i18n.resolve_language(code))
+
+        def in_new_language(message: str) -> str:
+            return catalog.get(message, message)
+
+        if self._on_restart_requested is None:
+            message = N_("The new language will apply the next time Plexible starts.")
+            wx.MessageBox(in_new_language(message), "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
+            return
+        question = N_("Plexible needs to restart to use the new language. Restart now?")
+        answer = wx.MessageBox(in_new_language(question), "Plexible", wx.ICON_QUESTION | wx.YES_NO, parent=self)
+        if answer == wx.YES:
+            self._on_restart_requested()
+            self.Close()
+        else:
+            self._set_status(in_new_language(N_("The new language will apply the next time Plexible starts.")))
 
     def _handle_toggle_dark_mode(self, event: wx.CommandEvent) -> None:
         """Toggle between light and dark UI themes without affecting NVDA accessibility."""
         dark = bool(event.IsChecked())
         self._config.set_ui_theme("dark" if dark else "light")
         self._apply_theme(dark)
-        self._set_status(f"Dark mode {'enabled' if dark else 'disabled'}.")
+        self._set_status(_("Dark mode enabled.") if dark else _("Dark mode disabled."))
 
     def _handle_toggle_auto_updates(self, event: wx.CommandEvent) -> None:
         enabled = bool(event.IsChecked())
         self._update_manager.set_auto_check_enabled(enabled)
-        status = "Automatic update checks enabled." if enabled else "Automatic update checks disabled."
+        status = _("Automatic update checks enabled.") if enabled else _("Automatic update checks disabled.")
         self._set_status(status)
 
     def _initialise_account(self) -> None:
@@ -746,13 +861,13 @@ class MainFrame(wx.Frame):
         if account:
             self._set_account(account)
         else:
-            self._set_status("Sign in to begin.")
+            self._set_status(_("Sign in to begin."))
             self._update_menu_state()
 
     def _set_account(self, account: MyPlexAccount) -> None:
         self._account = account
         self._service = PlexService(account, self._config)
-        self._set_status(f"Signed in as {account.username}. Loading servers…")
+        self._set_status(_("Signed in as {username}. Loading servers…", username=account.username))
         self._update_menu_state()
         self._load_libraries_async()
 
@@ -769,7 +884,11 @@ class MainFrame(wx.Frame):
                 if retry_count < max_retries and not self._closing:
                     print(f"[MainFrame] Library load failed (attempt {retry_count + 1}), retrying...: {exc}")
                     wx.CallAfter(lambda: self._set_status(
-                        f"Connection failed — retrying ({retry_count + 1}/{max_retries})…"
+                        _(
+                            "Connection failed — retrying ({attempt}/{total})…",
+                            attempt=retry_count + 1,
+                            total=max_retries,
+                        )
                     ))
                     time.sleep(2)
                     wx.CallAfter(lambda: self._load_libraries_async(retry_count + 1))
@@ -781,15 +900,20 @@ class MainFrame(wx.Frame):
 
         threading.Thread(target=worker, name="PlexLibraryLoader", daemon=True).start()
         if retry_count == 0:
-            self._set_status("Connecting to Plex server…")
+            self._set_status(_("Connecting to Plex server…"))
 
     def _handle_library_error(self, exc: Exception) -> None:
         if self._closing:
             return
         self._nav_tree.clear()
-        self._set_status(f"Failed to load libraries: {exc}")
-        wx.MessageBox(f"Unable to load Plex libraries:\n{exc}", "Plexible", wx.ICON_ERROR | wx.OK, parent=self)
-        self._queues_panel.show_placeholders("Unable to load queues.", "Unable to load queues.")
+        self._set_status(_("Failed to load libraries: {error}", error=exc))
+        wx.MessageBox(
+            _("Unable to load Plex libraries:\n{error}", error=exc),
+            "Plexible",
+            wx.ICON_ERROR | wx.OK,
+            parent=self,
+        )
+        self._queues_panel.show_placeholders(_("Unable to load queues."), _("Unable to load queues."))
 
     def _handle_libraries_loaded(self, server: PlexServer, libraries: Iterable, fallback: bool = False) -> None:
         if self._closing:
@@ -798,8 +922,8 @@ class MainFrame(wx.Frame):
             self._nav_tree.populate(libraries)
         except RuntimeError:
             return
-        library_count = sum(1 for _ in libraries)
-        self._status_message = f"Connected to {server.friendlyName}"
+        library_count = sum(1 for _library in libraries)
+        self._status_message = _("Connected to {server}", server=server.friendlyName)
         # Update status bar silently first, then announce with full message
         if hasattr(self, "_metadata_panel") and self._metadata_panel:
             self._metadata_panel.set_status_message(self._status_message)
@@ -812,16 +936,20 @@ class MainFrame(wx.Frame):
         self._flush_pending_progress()
         # Single delayed announcement so NVDA reads the ready message once
         if fallback:
-            preferred = self._config.get_selected_server_name() or "your preferred server"
-            announce_msg = (
-                f"Could not reach {preferred}. "
-                f"Connected to {server.friendlyName} instead. "
-                f"{library_count} libraries loaded."
+            preferred = self._config.get_selected_server_name() or _("your preferred server")
+            announce_msg = ngettext(
+                "Could not reach {preferred}. Connected to {server} instead. {count} library loaded.",
+                "Could not reach {preferred}. Connected to {server} instead. {count} libraries loaded.",
+                library_count,
+                preferred=preferred,
+                server=server.friendlyName,
             )
         else:
-            announce_msg = (
-                f"Ready. Connected to {server.friendlyName}. "
-                f"{library_count} libraries loaded."
+            announce_msg = ngettext(
+                "Ready. Connected to {server}. {count} library loaded.",
+                "Ready. Connected to {server}. {count} libraries loaded.",
+                library_count,
+                server=server.friendlyName,
             )
         wx.CallLater(500, lambda: self._announce_screen_reader(announce_msg))
 
@@ -835,10 +963,10 @@ class MainFrame(wx.Frame):
             return
         self._cancel_queue_refresh_timer()
         if not self._service:
-            self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
+            self._queues_panel.show_placeholders(_("Sign in to see your queue."), _("Sign in to see your queue."))
             return
 
-        self._queues_panel.show_placeholders("Loading...", "Loading...")
+        self._queues_panel.show_placeholders(_("Loading..."), _("Loading..."))
 
         def worker() -> None:
             try:
@@ -863,8 +991,8 @@ class MainFrame(wx.Frame):
             return
         if continue_items is None or up_next_items is None:
             self._queues_panel.show_placeholders(
-                "Unable to load queues. Try again shortly.",
-                "Unable to load queues. Try again shortly.",
+                _("Unable to load queues. Try again shortly."),
+                _("Unable to load queues. Try again shortly."),
             )
             return
         self._queues_panel.update_lists(continue_items, up_next_items)
@@ -911,14 +1039,14 @@ class MainFrame(wx.Frame):
             self._metadata_panel.update_content(plex_object, None)
             self._metadata_panel.set_radio_state(visible=False)
             self._metadata_panel.set_status_message(
-                plex_object.summary or "Expand this category to browse items."
+                plex_object.summary or _("Expand this category to browse items.")
             )
             return
         if isinstance(plex_object, MusicAlphaBucket):
             self._metadata_panel.update_content(plex_object, None)
             self._metadata_panel.set_radio_state(visible=False)
             self._metadata_panel.set_status_message(
-                plex_object.summary or "Expand to see items."
+                plex_object.summary or _("Expand to see items.")
             )
             return
         if isinstance(plex_object, MusicRadioStation):
@@ -928,9 +1056,9 @@ class MainFrame(wx.Frame):
             self._metadata_panel.set_radio_state(
                 visible=True,
                 enabled=True,
-                label="Play Radio.",
+                label=_("Play Radio."),
                 loading=False,
-                tooltip="Start this radio station.",
+                tooltip=_("Start this radio station."),
             )
             return
         if isinstance(plex_object, MusicRadioOption):
@@ -942,7 +1070,7 @@ class MainFrame(wx.Frame):
             self._metadata_panel.set_radio_state(
                 visible=True,
                 enabled=True,
-                label=option.label or "Play Radio.",
+                label=option.label or _("Play Radio."),
                 loading=False,
                 tooltip=description,
             )
@@ -965,18 +1093,18 @@ class MainFrame(wx.Frame):
             self._resolve_playable_async(cast(PlexObject, plex_object))
         if collection_candidate is not None and collection_identifier:
             dialog = self._ensure_collection_dialog(collection_candidate, collection_identifier)
-            dialog.show_loading("Loading collection items...")
-            self._metadata_panel.set_status_message("Collection items appear in the collection window.")
+            dialog.show_loading(_("Loading collection items..."))
+            self._metadata_panel.set_status_message(_("Collection items appear in the collection window."))
             self._load_collection_items_async(collection_candidate, collection_token, collection_identifier)
 
     @staticmethod
     def _radio_option_from_station(station: MusicRadioStation) -> RadioOption:
-        description = station.summary or f"{station.title} radio"
+        description = station.summary or _("{title} radio", title=station.title)
         return RadioOption(
             id=f"station:{station.identifier}",
             label=station.title,
             description=description,
-            category=station.category or "Stations",
+            category=station.category or _("Stations"),
             action="station",
             data={"station": station},
         )
@@ -995,9 +1123,9 @@ class MainFrame(wx.Frame):
         self._metadata_panel.set_radio_state(
             visible=True,
             enabled=False,
-            label="Radio…",
+            label=_("Radio…"),
             loading=True,
-            tooltip="Loading radio stations…",
+            tooltip=_("Loading radio stations…"),
         )
 
         def worker(target: Optional[PlexObject], token: int) -> None:
@@ -1020,7 +1148,7 @@ class MainFrame(wx.Frame):
     def _resolve_playable_async(self, plex_object: PlexObject) -> None:
         self._playable_request_token += 1
         request_token = self._playable_request_token
-        self._metadata_panel.set_status_message("Loading playback details...")
+        self._metadata_panel.set_status_message(_("Loading playback details..."))
 
         def worker(target: PlexObject, token: int) -> None:
             try:
@@ -1057,9 +1185,9 @@ class MainFrame(wx.Frame):
         if playable:
             return
         if error:
-            self._metadata_panel.set_status_message(f"Unable to resolve playback: {error}")
+            self._metadata_panel.set_status_message(_("Unable to resolve playback: {error}", error=error))
         else:
-            self._metadata_panel.set_status_message("Nothing available to play.")
+            self._metadata_panel.set_status_message(_("Nothing available to play."))
 
     def _apply_radio_options(
         self,
@@ -1074,11 +1202,11 @@ class MainFrame(wx.Frame):
         self._radio_loading = False
         self._radio_options = options
         if error:
-            tooltip = f"Radio unavailable: {error}"
+            tooltip = _("Radio unavailable: {error}", error=error)
             self._metadata_panel.set_radio_state(
                 visible=True,
                 enabled=False,
-                label="Radio…",
+                label=_("Radio…"),
                 loading=False,
                 tooltip=tooltip,
             )
@@ -1087,9 +1215,9 @@ class MainFrame(wx.Frame):
             self._metadata_panel.set_radio_state(
                 visible=True,
                 enabled=True,
-                label="Radio…",
+                label=_("Radio…"),
                 loading=False,
-                tooltip="Open the radio menu.",
+                tooltip=_("Open the radio menu."),
             )
         else:
             self._metadata_panel.set_radio_state(visible=False)
@@ -1098,8 +1226,8 @@ class MainFrame(wx.Frame):
         if not self._service:
             dialog = self._collection_dialog
             if dialog and identifier == self._collection_dialog_identifier:
-                dialog.show_error("Sign in to view this collection.")
-            self._metadata_panel.set_status_message("Sign in to view this collection.")
+                dialog.show_error(_("Sign in to view this collection."))
+            self._metadata_panel.set_status_message(_("Sign in to view this collection."))
             return
 
         def worker(target: PlexObject, request_token: int, target_id: str) -> None:
@@ -1137,19 +1265,23 @@ class MainFrame(wx.Frame):
         if not dialog:
             return
         dialog.set_collection_title(collection)
-        title = getattr(collection, "title", "collection")
+        title = getattr(collection, "title", None) or _("collection")
         if error:
-            message = f"Unable to load '{title}': {error}"
+            message = _("Unable to load '{title}': {error}", title=title, error=error)
             dialog.show_error(message)
             self._metadata_panel.set_status_message(message)
             return
         if not items:
-            message = "This collection does not contain any items."
+            message = _("This collection does not contain any items.")
             dialog.show_error(message)
             self._metadata_panel.set_status_message(message)
             return
         dialog.show_items(items, self._collection_item_fields)
-        summary = f"{len(items)} item{'s' if len(items) != 1 else ''} loaded in the collection window."
+        summary = ngettext(
+            "{count} item loaded in the collection window.",
+            "{count} items loaded in the collection window.",
+            len(items),
+        )
         self._metadata_panel.set_status_message(summary)
 
     def _collection_item_fields(self, item: PlexObject) -> tuple[str, str, str]:
@@ -1161,7 +1293,7 @@ class MainFrame(wx.Frame):
             title = str(item)
         clean_title = title.strip()
 
-        type_label = media_type.replace("_", " ").title() if media_type else "Item"
+        type_label = _type_label(media_type) if media_type else _("Item")
         details_parts: List[str] = []
 
         if media_type == "episode":
@@ -1196,7 +1328,7 @@ class MainFrame(wx.Frame):
                 details_parts.append(series.strip())
             index_raw = getattr(item, "index", None)
             if isinstance(index_raw, int):
-                details_parts.append(f"Season {index_raw}")
+                details_parts.append(_("Season {number}", number=index_raw))
         elif media_type == "artist":
             genre = getattr(item, "genre", None)
             if isinstance(genre, str) and genre.strip():
@@ -1223,7 +1355,7 @@ class MainFrame(wx.Frame):
             details_parts.append(trimmed if len(trimmed) <= 120 else f"{trimmed[:117]}...")
 
         details = " - ".join(details_parts)
-        return clean_title, type_label or "Item", details
+        return clean_title, type_label or _("Item"), details
 
     def _ensure_collection_dialog(self, collection: PlexObject, identifier: str) -> CollectionItemsDialog:
         dialog = self._collection_dialog
@@ -1274,7 +1406,7 @@ class MainFrame(wx.Frame):
             playable = None
         if not playable:
             wx.Bell()
-            self._metadata_panel.set_status_message("Unable to play the selected collection item.")
+            self._metadata_panel.set_status_message(_("Unable to play the selected collection item."))
             return
         self._selected_object = item
         self._selected_playable = playable
@@ -1289,7 +1421,12 @@ class MainFrame(wx.Frame):
             wx.Bell()
             return
         if not self._radio_options:
-            wx.MessageBox("No radio stations are available for this selection.", "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
+            wx.MessageBox(
+                _("No radio stations are available for this selection."),
+                "Plexible",
+                wx.ICON_INFORMATION | wx.OK,
+                parent=self,
+            )
             return
         if len(self._radio_options) == 1:
             self._start_radio_option(self._radio_options[0])
@@ -1309,13 +1446,13 @@ class MainFrame(wx.Frame):
         if not self._service:
             wx.Bell()
             return
-        self._set_status(f"Starting {option.label}…")
+        self._set_status(_("Starting {name}…", name=option.label))
         self._metadata_panel.set_radio_state(
             visible=True,
             enabled=False,
-            label="Radio…",
+            label=_("Radio…"),
             loading=True,
-            tooltip="Starting radio…",
+            tooltip=_("Starting radio…"),
         )
 
         def worker(selected: RadioOption, token: int) -> None:
@@ -1351,14 +1488,14 @@ class MainFrame(wx.Frame):
         self._metadata_panel.set_radio_state(
             visible=bool(self._radio_options),
             enabled=bool(self._radio_options),
-            label="Radio…",
+            label=_("Radio…"),
             loading=False,
-            tooltip="Open the radio menu." if self._radio_options else None,
+            tooltip=_("Open the radio menu.") if self._radio_options else None,
         )
         if error or not media or not session:
-            message = error or "Unknown error."
+            message = error or _("Unknown error.")
             wx.MessageBox(
-                f"Unable to start {option.label}:\n{message}",
+                _("Unable to start {name}:\n{error}", name=option.label, error=message),
                 "Plexible",
                 wx.ICON_ERROR | wx.OK,
                 parent=self,
@@ -1368,7 +1505,7 @@ class MainFrame(wx.Frame):
         self._register_radio_session(media, session)
         self._update_queue_display(session, media, focus=False, highlight_index=session.current_index)
         self._queue_manual_play(media)
-        self._set_status(f"Streaming {media.title} ({session.description})")
+        self._set_status(_("Streaming {title} ({description})", title=media.title, description=session.description))
 
     def _start_playlist_session(self, playlist: PlexObject) -> bool:
         if not self._service:
@@ -1378,7 +1515,11 @@ class MainFrame(wx.Frame):
             media, session = self._service.start_playlist(playlist)
         except Exception as exc:  # noqa: BLE001
             wx.MessageBox(
-                f"Unable to start playlist '{getattr(playlist, 'title', 'Playlist')}':\n{exc}",
+                _(
+                    "Unable to start playlist '{title}':\n{error}",
+                    title=getattr(playlist, "title", None) or _("Playlist"),
+                    error=exc,
+                ),
                 "Plexible",
                 wx.ICON_ERROR | wx.OK,
                 parent=self,
@@ -1398,7 +1539,7 @@ class MainFrame(wx.Frame):
         self._selected_playable = media
         playlist_key = getattr(playlist, "ratingKey", None)
         self._active_playlist_key = str(playlist_key) if playlist_key is not None else None
-        self._set_status(f"Streaming {media.title} (Playlist)")
+        self._set_status(_("Streaming {title} (Playlist)", title=media.title))
         return True
 
     def _register_radio_session(
@@ -1557,7 +1698,7 @@ class MainFrame(wx.Frame):
                 self._queue_manual_play(next_media)
                 self._selected_playable = next_media
                 self._update_queue_display(session, next_media, focus=True, highlight_index=next_index)
-                self._set_status(f"Streaming {next_media.title} ({session.description})")
+                self._set_status(_("Streaming {title} ({description})", title=next_media.title, description=session.description))
                 return
         elif direction < 0:
             # Previous: go back one index in the queue
@@ -1577,7 +1718,7 @@ class MainFrame(wx.Frame):
             session.metadata.pop("current_rating_key", None)
         if session is self._active_queue_session:
             self._update_queue_display(None, None)
-        for pending_key, (pending_session, _) in list(self._radio_pending_sessions.items()):
+        for pending_key, (pending_session, _pending_index) in list(self._radio_pending_sessions.items()):
             if pending_session is session or pending_key == key:
                 self._radio_pending_sessions.pop(pending_key, None)
 
@@ -1716,16 +1857,23 @@ class MainFrame(wx.Frame):
         self._schedule_progress_flush(5000)
         mode = self._playback_panel.play(media)
         if mode == "libvlc":
-            player_desc = "built-in LibVLC"
+            player_desc = _("built-in LibVLC")
         elif mode == "vlc":
             player_desc = "VLC"
         elif mode == "mpc":
             player_desc = "MPC"
         elif mode == "none":
-            player_desc = "player (failed)"
+            player_desc = _("player (failed)")
         else:
-            player_desc = "player"
-        self._set_status(f"Streaming {media.title} ({media.media_type}) via {player_desc}")
+            player_desc = _("player")
+        self._set_status(
+            _(
+                "Streaming {title} ({media_type}) via {player}",
+                title=media.title,
+                media_type=_type_label(media.media_type),
+                player=player_desc,
+            )
+        )
 
     def _handle_queue_selection(self, media: Optional[PlayableMedia]) -> None:
         if media:
@@ -1735,22 +1883,24 @@ class MainFrame(wx.Frame):
             self._metadata_panel.update_content(None, None)
             self._metadata_panel.set_radio_state(visible=False)
 
-    def _handle_sign_in(self, _: wx.CommandEvent) -> None:
+    def _handle_sign_in(self, _event: wx.CommandEvent) -> None:
         if self._account:
-            wx.MessageBox("You are already signed in.", "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
+            wx.MessageBox(_("You are already signed in."), "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
             return
         def pin_ready(pin_code: str, oauth_url: str) -> None:
             wx.CallAfter(lambda: self._set_status(
-                f"Plex PIN: {pin_code} — visit {oauth_url} to approve"
+                _("Plex PIN: {pin} — visit {url} to approve", pin=pin_code, url=oauth_url)
             ))
 
         def callback(success: bool, account: Optional[MyPlexAccount], error: Optional[Exception]) -> None:
             wx.CallAfter(self._on_auth_result, success, account, error)
 
         self._show_busy(
-            "A browser window was opened for Plex authentication."
-            "\nIf the browser did not open, check the status bar for a PIN code."
-            "\nVisit https://plex.tv/link and enter the PIN to approve."
+            _(
+                "A browser window was opened for Plex authentication."
+                "\nIf the browser did not open, check the status bar for a PIN code."
+                "\nVisit https://plex.tv/link and enter the PIN to approve."
+            )
         )
         self._auth.authenticate_with_browser(callback, on_pin_ready=pin_ready)
 
@@ -1763,12 +1913,17 @@ class MainFrame(wx.Frame):
         if success and account:
             self._set_account(account)
         else:
-            message = str(error) if error else "Authentication was cancelled."
-            wx.MessageBox(f"Unable to authenticate with Plex:\n{message}", "Plexible", wx.ICON_ERROR | wx.OK, parent=self)
-            self._set_status("Sign in to begin.")
+            message = str(error) if error else _("Authentication was cancelled.")
+            wx.MessageBox(
+                _("Unable to authenticate with Plex:\n{error}", error=message),
+                "Plexible",
+                wx.ICON_ERROR | wx.OK,
+                parent=self,
+            )
+            self._set_status(_("Sign in to begin."))
             self._update_menu_state()
 
-    def _handle_sign_out(self, _: wx.CommandEvent) -> None:
+    def _handle_sign_out(self, _event: wx.CommandEvent) -> None:
         if not self._account:
             return
         self._auth.sign_out()
@@ -1783,22 +1938,32 @@ class MainFrame(wx.Frame):
         # left; acting on them would target the next account's server.
         self._dismiss_collection_dialog()
         self._last_queue_play_key = None
-        self._queues_panel.show_placeholders("Sign in to see your queue.", "Sign in to see your queue.")
-        self._set_status("Signed out.")
+        self._queues_panel.show_placeholders(_("Sign in to see your queue."), _("Sign in to see your queue."))
+        self._set_status(_("Signed out."))
         self._update_menu_state()
         self._refresh_player_menu()
 
-    def _handle_refresh(self, _: wx.CommandEvent) -> None:
+    def _handle_refresh(self, _event: wx.CommandEvent) -> None:
         if not self._service:
-            self._set_status("Sign in to refresh libraries.")
+            self._set_status(_("Sign in to refresh libraries."))
             return
         self._load_libraries_async()
 
-    def _handle_search(self, _: wx.CommandEvent) -> None:
+    def _handle_search(self, _event: wx.CommandEvent) -> None:
         if not self._service:
-            wx.MessageBox("Sign in to search your Plex libraries.", "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
+            wx.MessageBox(
+                _("Sign in to search your Plex libraries."),
+                "Plexible",
+                wx.ICON_INFORMATION | wx.OK,
+                parent=self,
+            )
             return
-        entry = wx.TextEntryDialog(self, "Enter a keyword to search across all libraries:", "Global Search")
+        entry = wx.TextEntryDialog(
+            self,
+            _("Enter a keyword to search across all libraries:"),
+            _("Global Search"),
+        )
+        _localise_stock_buttons(entry)
         if entry.ShowModal() != wx.ID_OK:
             entry.Destroy()
             return
@@ -1842,11 +2007,17 @@ class MainFrame(wx.Frame):
         if result == wx.ID_OK and selected_hit:
             self._handle_search_hit(selected_hit)
         elif errors:
-            self._set_status(f"Search finished with {len(errors)} server issue(s).")
+            self._set_status(
+                ngettext(
+                    "Search finished with {count} server issue.",
+                    "Search finished with {count} server issues.",
+                    len(errors),
+                )
+            )
         elif not results_dialog.has_hits:
-            self._set_status(f"No results for '{query}'.")
+            self._set_status(_("No results for '{query}'.", query=query))
         else:
-            self._set_status(f"Search cancelled for '{query}'.")
+            self._set_status(_("Search cancelled for '{query}'.", query=query))
 
     def _handle_search_hit(self, hit: SearchHit) -> None:
         if not self._service:
@@ -1857,11 +2028,16 @@ class MainFrame(wx.Frame):
             return
         self._open_search_hit(hit)
 
-    def _handle_change_server(self, _: wx.CommandEvent) -> None:
+    def _handle_change_server(self, _event: wx.CommandEvent) -> None:
         if not self._service:
-            wx.MessageBox("Sign in to select a Plex server.", "Plexible", wx.ICON_INFORMATION | wx.OK, parent=self)
+            wx.MessageBox(
+                _("Sign in to select a Plex server."),
+                "Plexible",
+                wx.ICON_INFORMATION | wx.OK,
+                parent=self,
+            )
             return
-        self._show_busy("Loading available servers...")
+        self._show_busy(_("Loading available servers..."))
 
         def worker() -> None:
             try:
@@ -2057,7 +2233,7 @@ class MainFrame(wx.Frame):
         server_label = self._format_server_label(hit.resource, None)
         parts = [str(title)]
         if media_type:
-            parts.append(f"[{media_type}]")
+            parts.append(f"[{_type_label(media_type)}]")
         if extras:
             parts.append(f"({' / '.join(extras)})")
         if section_title:
@@ -2073,7 +2249,7 @@ class MainFrame(wx.Frame):
             self._show_tag_dialog(hit, item)
             return
         self._display_search_result(item)
-        self._set_status(f"Showing result '{getattr(item, 'title', str(item))}'.")
+        self._set_status(_("Showing result '{title}'.", title=getattr(item, "title", str(item))))
 
     def _show_tag_dialog(self, hit: Optional[SearchHit], tag: PlexObject) -> None:
         if not self._service:
@@ -2083,7 +2259,7 @@ class MainFrame(wx.Frame):
             server = hit.server if hit else self._service.ensure_server()
         except Exception as exc:  # noqa: BLE001
             wx.MessageBox(
-                f"Unable to connect to the Plex server for this tag:\n{exc}",
+                _("Unable to connect to the Plex server for this tag:\n{error}", error=exc),
                 "Plexible",
                 wx.ICON_ERROR | wx.OK,
                 parent=self,
@@ -2091,7 +2267,7 @@ class MainFrame(wx.Frame):
             return
         if resource is None or server is None:
             wx.MessageBox(
-                "Tag items are unavailable because no Plex server is connected.",
+                _("Tag items are unavailable because no Plex server is connected."),
                 "Plexible",
                 wx.ICON_WARNING | wx.OK,
                 parent=self,
@@ -2101,9 +2277,9 @@ class MainFrame(wx.Frame):
         heading = title if not category else f"{title} ({category})"
         self._metadata_panel.update_content(tag, None)
         self._metadata_panel.set_radio_state(visible=False)
-        self._set_status(f"Loading tag '{heading}'…")
-        dialog = SearchResultsDialog(self, f"Tag: {heading}")
-        dialog.update_status("Loading tag items…")
+        self._set_status(_("Loading tag '{name}'…", name=heading))
+        dialog = SearchResultsDialog(self, _("Tag: {name}", name=heading))
+        dialog.update_status(_("Loading tag items…"))
 
         def worker() -> None:
             batch: List[Tuple[SearchHit, str]] = []
@@ -2122,10 +2298,15 @@ class MainFrame(wx.Frame):
                 wx.CallAfter(dialog.finish, [])
                 wx.CallAfter(
                     dialog.update_status,
-                    f"Loaded {count} item(s) for tag '{heading}'.",
+                    ngettext(
+                        "Loaded {count} item for tag '{name}'.",
+                        "Loaded {count} items for tag '{name}'.",
+                        count,
+                        name=heading,
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
-                wx.CallAfter(dialog.finish_with_error, f"Unable to load tag items: {exc}")
+                wx.CallAfter(dialog.finish_with_error, _("Unable to load tag items: {error}", error=exc))
 
         threading.Thread(target=worker, name="PlexTagLoader", daemon=True).start()
         result = dialog.ShowModal()
@@ -2137,28 +2318,51 @@ class MainFrame(wx.Frame):
             self._handle_search_hit(selected_hit)
             return
         if errors:
-            self._set_status(f"Tag '{heading}' finished with {len(errors)} issue(s).")
+            self._set_status(
+                ngettext(
+                    "Tag '{name}' finished with {count} issue.",
+                    "Tag '{name}' finished with {count} issues.",
+                    len(errors),
+                    name=heading,
+                )
+            )
         elif not has_hits:
-            self._set_status(f"No videos found for tag '{heading}'.")
+            self._set_status(_("No videos found for tag '{name}'.", name=heading))
         else:
-            self._set_status(f"Tag browsing cancelled for '{heading}'.")
+            self._set_status(_("Tag browsing cancelled for '{name}'.", name=heading))
 
     def _handle_server_change_error(self, exc: Exception) -> None:
         if self._closing:
             return
         self._clear_busy()
-        wx.MessageBox(f"Unable to retrieve Plex servers:\n{exc}", "Plexible", wx.ICON_ERROR | wx.OK, parent=self)
+        wx.MessageBox(
+            _("Unable to retrieve Plex servers:\n{error}", error=exc),
+            "Plexible",
+            wx.ICON_ERROR | wx.OK,
+            parent=self,
+        )
 
     def _prompt_server_selection(self, servers: List[MyPlexResource]) -> None:
         if self._closing:
             return
         self._clear_busy()
         if not servers:
-            wx.MessageBox("No Plex servers were returned for this account.", "Plexible", wx.ICON_WARNING | wx.OK, parent=self)
+            wx.MessageBox(
+                _("No Plex servers were returned for this account."),
+                "Plexible",
+                wx.ICON_WARNING | wx.OK,
+                parent=self,
+            )
             return
         current_id = self._service.current_resource_id() if self._service else None  # type: ignore[union-attr]
         labels = [self._format_server_label(resource, current_id) for resource in servers]
-        dialog = wx.SingleChoiceDialog(self, "Select the Plex server to connect to:", "Change Server", labels)
+        dialog = wx.SingleChoiceDialog(
+            self,
+            _("Select the Plex server to connect to:"),
+            _("Change Server"),
+            labels,
+        )
+        _localise_stock_buttons(dialog)
         if current_id:
             for index, resource in enumerate(servers):
                 if resource.clientIdentifier == current_id:
@@ -2176,10 +2380,10 @@ class MainFrame(wx.Frame):
         if label is None:
             label = self._format_server_label(resource, current_id)
         if current_id and resource.clientIdentifier == current_id:
-            self._set_status(f"Already connected to {label}.")
+            self._set_status(_("Already connected to {name}.", name=label))
             return
         self._pending_selection = post_selection
-        self._show_busy(f"Connecting to {label}...")
+        self._show_busy(_("Connecting to {name}...", name=label))
 
         def worker() -> None:
             try:
@@ -2208,7 +2412,7 @@ class MainFrame(wx.Frame):
         self._last_queue_play_key = None
         self._refresh_watch_queues()
         self._flush_pending_progress()
-        self._set_status(f"Connected to {server.friendlyName}.")
+        self._set_status(_("Connected to {server}.", server=server.friendlyName))
         self._refresh_player_menu()
         if self._pending_selection:
             hit = self._pending_selection
@@ -2222,7 +2426,7 @@ class MainFrame(wx.Frame):
                 self._open_search_hit(refreshed_hit)
             except Exception as exc:  # noqa: BLE001
                 wx.MessageBox(
-                    f"Unable to load the selected item after switching servers:\n{exc}",
+                    _("Unable to load the selected item after switching servers:\n{error}", error=exc),
                     "Plexible",
                     wx.ICON_ERROR | wx.OK,
                     parent=self,
@@ -2456,7 +2660,7 @@ class MainFrame(wx.Frame):
                 highlight_index=pending_index if pending_index is not None else pending_session.current_index,
             )
         self._queue_manual_play(media)
-        self._set_status(f"Auto-playing next episode: {media.title}")
+        self._set_status(_("Auto-playing next episode: {title}", title=media.title))
 
     def _remove_autoplay_candidate(
         self,
@@ -2565,79 +2769,79 @@ class MainFrame(wx.Frame):
         self._player_fullscreen_item.Check(bool(state.get("fullscreen", False)))
         self._player_mute_item.Check(muted)
 
-    def _handle_player_play(self, _: wx.CommandEvent) -> None:
+    def _handle_player_play(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.resume():
             wx.Bell()
             self._refresh_player_menu()
 
-    def _handle_player_pause(self, _: wx.CommandEvent) -> None:
+    def _handle_player_pause(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.pause():
             wx.Bell()
             self._refresh_player_menu()
 
-    def _handle_player_stop(self, _: wx.CommandEvent) -> None:
+    def _handle_player_stop(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.stop_playback():
             wx.Bell()
         self._active_playlist_key = None
         self._refresh_player_menu()
 
-    def _handle_player_prev_track(self, _: wx.CommandEvent) -> None:
+    def _handle_player_prev_track(self, _event: wx.CommandEvent) -> None:
         self._handle_skip(-1)
         self._refresh_player_menu()
 
-    def _handle_player_next_track(self, _: wx.CommandEvent) -> None:
+    def _handle_player_next_track(self, _event: wx.CommandEvent) -> None:
         self._handle_skip(1)
         self._refresh_player_menu()
 
-    def _handle_player_rewind(self, _: wx.CommandEvent) -> None:
+    def _handle_player_rewind(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.seek_by(-SEEK_STEP_MS):
             wx.Bell()
         self._refresh_player_menu()
 
-    def _handle_player_fast_forward(self, _: wx.CommandEvent) -> None:
+    def _handle_player_fast_forward(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.seek_by(SEEK_STEP_MS):
             wx.Bell()
         self._refresh_player_menu()
 
-    def _handle_player_announce(self, _: wx.CommandEvent) -> None:
+    def _handle_player_announce(self, _event: wx.CommandEvent) -> None:
         """Speak the current playback state via the status bar for screen readers."""
         state = self._playback_panel.get_state()
         if not state.get("has_media"):
-            self._announce_screen_reader("Nothing is playing.", interrupt=True)
+            self._announce_screen_reader(_("Nothing is playing."), interrupt=True)
             return
         parts = []
         # What's playing
         media = self._playback_panel._current
         if media:
-            parts.append(f"Playing: {media.title}")
+            parts.append(_("Playing: {title}", title=media.title))
         # Mode
         mode = state.get("mode", "")
         if mode == "libvlc" and not state.get("can_pause", False):
-            parts.append("Paused")
+            parts.append(_("Paused"))
         elif mode == "libvlc":
-            parts.append("Playing")
+            parts.append(_("Playing"))
         elif mode == "stopped":
-            parts.append("Stopped")
+            parts.append(_("Stopped"))
         # Volume
-        parts.append(f"Volume {state.get('volume', 0)}%")
+        parts.append(_("Volume {volume}%", volume=state.get("volume", 0)))
         if state.get("muted"):
-            parts.append("Muted")
+            parts.append(_("Muted"))
         # Fullscreen
         if state.get("fullscreen"):
-            parts.append("Fullscreen")
+            parts.append(_("Fullscreen"))
         self._announce_screen_reader(". ".join(parts), interrupt=True)
 
-    def _handle_player_volume_up(self, _: wx.CommandEvent) -> None:
+    def _handle_player_volume_up(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.adjust_volume(5):
             wx.Bell()
         self._refresh_player_menu()
 
-    def _handle_player_volume_down(self, _: wx.CommandEvent) -> None:
+    def _handle_player_volume_down(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.adjust_volume(-5):
             wx.Bell()
         self._refresh_player_menu()
 
-    def _handle_player_fullscreen(self, _: wx.CommandEvent) -> None:
+    def _handle_player_fullscreen(self, _event: wx.CommandEvent) -> None:
         if not self._playback_panel.set_fullscreen(self._player_fullscreen_item.IsChecked()):
             wx.Bell()
             self._player_fullscreen_item.Check(self._playback_panel.is_fullscreen())
@@ -2652,11 +2856,10 @@ class MainFrame(wx.Frame):
         self._refresh_player_menu()
 
     def _format_server_label(self, resource: MyPlexResource, current_id: Optional[str]) -> str:
-        name = resource.name or resource.product or "Plex Server"
-        suffix = ""
+        name = resource.name or resource.product or _("Plex Server")
         if resource.clientIdentifier == current_id:
-            suffix = " (current)"
-        return f"{name}{suffix}"
+            return _("{name} (current)", name=name)
+        return name
 
     # ------------------------------------------------------------------ Accessibility
 
@@ -2756,14 +2959,15 @@ class MainFrame(wx.Frame):
             # Color-code status bar background for quick visual state recognition.
             # Never change text color — only background tint, so NVDA/high-contrast is unaffected.
             dark = self._config.get_ui_theme() == "dark"
+            # Messages are translated, so each tone lists its English and French cues.
             lower = (message or "").lower()
-            if any(w in lower for w in ("connected", "ready", "signed in", "streaming")):
+            if any(w in lower for w in _STATUS_SUCCESS_CUES):
                 bg = wx.Colour(30, 60, 30) if dark else wx.Colour(232, 245, 233)
                 self._status_bar.SetBackgroundColour(bg)
-            elif any(w in lower for w in ("connecting", "loading", "signing", "retrying", "searching")):
+            elif any(w in lower for w in _STATUS_PROGRESS_CUES):
                 bg = wx.Colour(60, 50, 20) if dark else wx.Colour(255, 248, 225)
                 self._status_bar.SetBackgroundColour(bg)
-            elif any(w in lower for w in ("error", "failed", "unable", "cannot")):
+            elif any(w in lower for w in _STATUS_ERROR_CUES):
                 bg = wx.Colour(60, 25, 25) if dark else wx.Colour(255, 235, 238)
                 self._status_bar.SetBackgroundColour(bg)
             else:

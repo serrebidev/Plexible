@@ -44,6 +44,7 @@ except ImportError:
             return None
 
 from .config import ConfigStore
+from .i18n import _
 
 
 class AuthError(Exception):
@@ -73,7 +74,7 @@ class AuthManager:
         except Unauthorized as exc:
             # Token is not valid anymore.
             self._config.set_auth_token(None)
-            raise AuthError("Saved Plex token is no longer valid.") from exc
+            raise AuthError(_("Saved Plex token is no longer valid.")) from exc
         return self._account
 
     def sign_out(self) -> None:
@@ -105,7 +106,7 @@ class AuthManager:
                 oauth_url = str(pin.oauthUrl or "")
                 if not oauth_url:
                     # Without a URL the flow can only sit until the timeout expires.
-                    raise AuthError("Plex did not return a sign-in URL.")
+                    raise AuthError(_("Plex did not return a sign-in URL."))
                 opened = webbrowser.open(oauth_url)
                 # Always notify the UI of the PIN code / URL so the user can
                 # paste them manually if the browser did not open.
@@ -115,7 +116,7 @@ class AuthManager:
                     print(f"[Auth] Browser may not have opened. PIN: {pin_code} URL: {oauth_url}")
                 token = pin.waitForAuthToken(timeout=timeout)
                 if not token:
-                    raise AuthError("Authentication timed out before approval.")
+                    raise AuthError(_("Authentication timed out before approval."))
                 account = MyPlexAccount(token=token)
                 self._config.set_auth_token(token)
                 self._account = account

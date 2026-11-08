@@ -6,7 +6,33 @@ import wx
 
 from plexapi.base import PlexObject
 
+from ..i18n import N_, _, ngettext
 from ..plex_service import PlayableMedia
+
+
+# Plex type codes -> names shown to the user (translated at display time).
+_MEDIA_TYPE_NAMES: dict[str, str] = {
+    "movie": N_("Movie"),
+    "show": N_("TV Show"),
+    "season": N_("Season"),
+    "episode": N_("Episode"),
+    "artist": N_("Artist"),
+    "album": N_("Album"),
+    "track": N_("Track"),
+    "photo": N_("Photo"),
+    "photoalbum": N_("Photo Album"),
+    "clip": N_("Clip"),
+    "collection": N_("Collection"),
+    "playlist": N_("Playlist"),
+}
+
+
+def media_type_name(media_type: str) -> str:
+    """Translated, capitalised name for a Plex type code ("movie" -> "Movie")."""
+    name = _MEDIA_TYPE_NAMES.get(media_type)
+    if name is not None:
+        return _(name)
+    return media_type.capitalize()
 
 
 # wx.Accessible (MSAA) exists only on Windows: on GTK and macOS its constructor
@@ -129,13 +155,13 @@ class MetadataPanel(TransparentContainer):
         on_radio: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(parent)
-        self.SetAccessible(NamedAccessible("Metadata Panel", "pane"))
+        self.SetAccessible(NamedAccessible(_("Metadata Panel"), "pane"))
         self._on_play = on_play
         self._on_radio = on_radio
 
         # Title with visual accent bar
-        self._title = wx.StaticText(self, label="Select an item to see details.")
-        self._title.SetName("Selected Item Title")
+        self._title = wx.StaticText(self, label=_("Select an item to see details."))
+        self._title.SetName(_("Selected Item Title"))
         bold_font = self._title.GetFont()
         bold_font.SetPointSize(bold_font.GetPointSize() + 2)
         bold_font.SetWeight(wx.FONTWEIGHT_BOLD)
@@ -144,22 +170,22 @@ class MetadataPanel(TransparentContainer):
 
         # Thin accent bar under the title (decorative only, never focusable)
         self._title_accent = DecorativePanel(self, size=(-1, 2))
-        self._title_accent.SetName("Title Accent")
+        self._title_accent.SetName(_("Title Accent"))
         self._title_accent.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_HIGHLIGHT))
 
         self._type_label = wx.StaticText(self, label="")
-        self._type_label.SetName("Media Type")
+        self._type_label.SetName(_("Media Type"))
         self._type_label.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
         self._queue_focus_handler: Optional[Callable[[], bool]] = None
         self._summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_THEME)
         self._summary.SetMinSize((200, 120))
         # SetName does not reach MSAA for a native edit, so NVDA used to announce
         # only "edit read only multi line". Attach a real accessible instead.
-        self._summary_accessible = name_control(self._summary, "Item Description", "text")
+        self._summary_accessible = name_control(self._summary, _("Item Description"), "text")
         self._summary.Bind(wx.EVT_NAVIGATION_KEY, self._handle_summary_navigation)
 
-        self._play_button = wx.Button(self, wx.ID_ANY, label="Play")
-        self._play_button.SetName("Play Selected Item")
+        self._play_button = wx.Button(self, wx.ID_ANY, label=_("Play"))
+        self._play_button.SetName(_("Play Selected Item"))
         self._play_button.SetBackgroundColour(wx.Colour(46, 125, 50))
         self._play_button.SetForegroundColour(wx.WHITE)
         self._play_button.Disable()
@@ -167,8 +193,8 @@ class MetadataPanel(TransparentContainer):
         self._play_button.Bind(wx.EVT_CHAR_HOOK, self._handle_play_char)
         self._play_button.Bind(wx.EVT_KEY_DOWN, self._handle_play_key)
 
-        self._radio_button = wx.Button(self, wx.ID_ANY, label="Radio…")
-        self._radio_button.SetName("Start Radio")
+        self._radio_button = wx.Button(self, wx.ID_ANY, label=_("Radio…"))
+        self._radio_button.SetName(_("Start Radio"))
         self._radio_button.Disable()
         self._radio_button.Hide()
         self._radio_button.Bind(wx.EVT_BUTTON, self._handle_radio)
@@ -206,17 +232,17 @@ class MetadataPanel(TransparentContainer):
 
     def update_content(self, obj: Optional[PlexObject], playable: Optional[PlayableMedia]) -> None:
         if obj is None:
-            self._title.SetLabel("Select an item to see details.")
+            self._title.SetLabel(_("Select an item to see details."))
             self._type_label.SetLabel("")
             self._current_media = None
             self._apply_status_text()
             self.set_radio_state(visible=False)
             return
 
-        self._title.SetLabel(getattr(obj, "title", "Untitled"))
+        self._title.SetLabel(getattr(obj, "title", None) or _("Untitled"))
         type_label = getattr(obj, "type", "")
         if type_label:
-            self._type_label.SetLabel(f"Type: {type_label}")
+            self._type_label.SetLabel(_("Type: {media_type}", media_type=media_type_name(type_label)))
         else:
             self._type_label.SetLabel("")
 
@@ -239,12 +265,12 @@ class MetadataPanel(TransparentContainer):
         *,
         visible: bool,
         enabled: bool = False,
-        label: str = "Radio…",
+        label: Optional[str] = None,
         loading: bool = False,
         tooltip: Optional[str] = None,
     ) -> None:
         self._radio_loading = loading
-        self._radio_button.SetLabel(label)
+        self._radio_button.SetLabel(label if label is not None else _("Radio…"))
         self._radio_button.SetToolTip(tooltip or "")
         if visible:
             if not self._radio_visible:
@@ -328,7 +354,7 @@ class QueuesPanel(TransparentContainer):
         on_refresh: Callable[[], None],
     ) -> None:
         super().__init__(parent)
-        self.SetAccessible(NamedAccessible("Queue Panels", "pane"))
+        self.SetAccessible(NamedAccessible(_("Queue Panels"), "pane"))
         self._on_play = on_play
         self._on_select = on_select
         self._on_refresh = on_refresh
@@ -337,8 +363,8 @@ class QueuesPanel(TransparentContainer):
         self._upnext_items: List[PlayableMedia] = []
         self._suppress_events = False
         self._accessible_refs: List[NamedAccessible] = []
-        self._continue_label = "Continue Watching"
-        self._upnext_label = "Up Next"
+        self._continue_label = _("Continue Watching")
+        self._upnext_label = _("Up Next")
         self._continue_last_key: Optional[str] = None
         self._continue_last_index: int = -1
         self._upnext_last_key: Optional[str] = None
@@ -406,7 +432,7 @@ class QueuesPanel(TransparentContainer):
             self._set_placeholder(
                 self._continue_list,
                 self._continue_placeholder,
-                "Nothing in progress yet.",
+                _("Nothing in progress yet."),
             )
 
         if self._upnext_items:
@@ -424,7 +450,7 @@ class QueuesPanel(TransparentContainer):
             self._set_placeholder(
                 self._upnext_list,
                 self._upnext_placeholder,
-                "No upcoming episodes right now.",
+                _("No upcoming episodes right now."),
             )
 
         restored = self._restore_last_selection()
@@ -555,12 +581,17 @@ class QueuesPanel(TransparentContainer):
         remaining = max(0, duration - offset)
         remaining_minutes = remaining // 60000
         if remaining_minutes >= 1:
-            return f"{percent}% · {remaining_minutes} min left"
-        return f"{percent}% watched"
+            return ngettext(
+                "{percent}% · {count} min left",
+                "{percent}% · {count} min left",
+                remaining_minutes,
+                percent=percent,
+            )
+        return _("{percent}% watched", percent=percent)
 
     def _format_media_type(self, item: PlexObject) -> str:
         media_type = getattr(item, "type", "") or ""
-        return media_type.capitalize()
+        return media_type_name(media_type)
 
     def _on_continue_selected(self, event: wx.CommandEvent) -> None:
         if self._suppress_events:

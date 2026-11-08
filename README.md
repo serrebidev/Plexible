@@ -11,6 +11,7 @@ Plexible is a desktop Plex client built with wxPython and the latest [`python-pl
 - Metadata viewer with quick playback controls.
 - Embedded playback surface powered by LibVLC.
 - Global search across all Plex libraries with `Ctrl+F`, plus quick server switching from the File menu.
+- Available in English and French (follows the system language, or pick one under **Help > Language**).
 
 ## Getting Started
 
@@ -34,6 +35,14 @@ Plexible is a desktop Plex client built with wxPython and the latest [`python-pl
 - Configuration and the Plex authentication token are stored in `config.json` in the project root (next to `main.py`).
 - The client id persists between runs to avoid repeated approval prompts.
 - Playback uses the Plex stream URLs directly. Depending on codecs installed locally, videos may sometimes fall back to Plex's transcoding pipeline.
+
+## Languages
+Plexible follows the Windows display language by default. Use **Help > Language** to pick English or Français instead; Plexible offers to restart so the change applies right away. Setting the `PLEXIBLE_LANGUAGE` environment variable (`en`, `fr`) overrides both.
+
+To add or fix a translation:
+- User-facing text stays in English in the code, wrapped in `_()` from `plex_client/i18n.py`. Use named placeholders, never f-strings: `_("Connecting to {name}...", name=name)`. Use `ngettext()` for text that depends on a count and `N_()` for module-level constants.
+- Translations live in `plex_client/locales/<code>.py` as a `MESSAGES` dict mapping the English text to the translation. A new language also needs an entry in `SUPPORTED_LANGUAGES`.
+- `tests/test_i18n.py` fails if a wrapped string has no French translation, if placeholders differ, or if the catalog has unused entries.
 
 ## Troubleshooting
 - If playback does not start, confirm that the stream URL opens in your default browser. Some file types may require additional codecs in Windows.
