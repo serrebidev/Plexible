@@ -54,6 +54,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+call :ensure_nvda_client
+if errorlevel 1 (
+    popd >nul
+    exit /b 1
+)
+
 echo Running PyInstaller...
 %PYTHON_CMD% -m PyInstaller --noconfirm "%ROOT_DIR%plexible.spec"
 
@@ -193,6 +199,11 @@ if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
 if "%DRY_RUN%"=="1" (
     echo [dry-run] %PYTHON_CMD% -m PyInstaller --noconfirm "%SPEC_FILE%"
 ) else (
+    call :ensure_nvda_client
+    if errorlevel 1 (
+        popd >nul
+        exit /b 1
+    )
     echo Running PyInstaller...
     %PYTHON_CMD% -m PyInstaller --noconfirm "%SPEC_FILE%"
     if errorlevel 1 (
@@ -393,6 +404,16 @@ if "%SIGNING_THUMBPRINT%"=="" (
 )
 if errorlevel 1 (
     echo Failed to write update manifest.
+    exit /b 1
+)
+exit /b 0
+
+:ensure_nvda_client
+rem Plexible speaks through NVDA with this DLL; plexible.spec bundles it from bin\.
+echo Checking NVDA controller client...
+%PYTHON_CMD% "%ROOT_DIR%tools\ensure_nvda_controller_client.py" --dest "%ROOT_DIR%bin"
+if errorlevel 1 (
+    echo ERROR: Unable to fetch the NVDA controller client into "%ROOT_DIR%bin".
     exit /b 1
 )
 exit /b 0

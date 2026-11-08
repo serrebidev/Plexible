@@ -70,10 +70,25 @@ added_files = [
     ('plex_client/update_helper.bat', '.'),
 ]
 
+# NVDA controller client, used by plex_client/screen_reader.py to speak.
+# build_exe.bat fetches it into bin/ with tools/ensure_nvda_controller_client.py.
+added_binaries = []
+if sys.platform == 'win32':
+    nvda_dll = os.path.join(SPECPATH, 'bin', 'nvdaControllerClient.dll')
+    if not os.path.isfile(nvda_dll):
+        raise SystemExit(
+            'Missing bin/nvdaControllerClient.dll. Run: '
+            'python tools/ensure_nvda_controller_client.py --dest bin'
+        )
+    added_binaries.append((nvda_dll, '.'))
+    nvda_license = os.path.join(SPECPATH, 'bin', 'nvdaControllerClient-license.txt')
+    if os.path.isfile(nvda_license):
+        added_files.append((nvda_license, '.'))
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=added_binaries,
     datas=added_files,
     hiddenimports=hidden_imports,
     hookspath=[],

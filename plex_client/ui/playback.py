@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import requests
 import wx
 
+from .. import screen_reader
 from ..config import ConfigStore
 from ..plex_service import PlayableMedia
 from .content_panel import (
@@ -1522,8 +1523,8 @@ class PlaybackPanel(TransparentContainer):
             self._cancel_timeline_poll()
             position = 1000 if duration else 0
             self._notify_timeline_state("playing", position, duration)
-        # Announce to screen readers without overwriting the VLC header label
-        self._announce_accessible(f"Playing: {self._current.title}", flash_label=False)
+        # No "Playing:" announcement here: the main window already speaks its
+        # "Streaming …" status for the same event, and both would be read.
 
     def _start_timeline_poll(self, delay_ms: int = 5000) -> None:
         self._cancel_timeline_poll()
@@ -1735,25 +1736,13 @@ class PlaybackPanel(TransparentContainer):
         self._last_timeline_position = 0
         self._reset_seek_slider()
 
-    def _announce_accessible(self, message: str, *, flash_label: bool = True) -> None:
-        """Announce a status change to screen readers.
+    def _announce_accessible(self, message: str) -> None:
+        """Speak a transport change (stop, pause, resume) and flash it in the header.
 
-        Uses the wx.Accessible API when available, falling back to a
-        transient header label change that NVDA will detect.
-
-        Set ``flash_label=False`` to only fire the accessible event
-        without modifying the header label (use when the label is already
-        correct and should not be overwritten).
+        These answer a key the user just pressed, so they interrupt speech.
         """
-        try:
-            accessible = self._header.GetAccessible()
-            if accessible:
-                accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_NAMECHANGE, 0, wx.ACC_SELF)
-        except Exception:
-            pass
-        if not flash_label:
-            return
-        # Transient label flash for visual + accessibility fallback. If a flash is
+        screen_reader.speak(message, interrupt=True)
+        # Transient label flash so sighted users see it too. If a flash is
         # already pending, restore to the label it was going to restore to -- the
         # currently displayed text is the previous announcement, not the real state.
         pending_target = getattr(self, "_label_restore_target", None)
