@@ -401,6 +401,21 @@ class PlaybackPanel(TransparentContainer):
             "fullscreen": self._fullscreen,
         }
 
+    @staticmethod
+    def _start_offset(media: PlayableMedia) -> int:
+        """Where this play starts, in milliseconds.
+
+        A music track always starts from the beginning. Its PlayableMedia is
+        often reused (the selected item keeps one), and the timeline updates
+        write the last position into it, so Stop then Play resumed like a pause.
+        Clearing it here also stops the first timeline update from reporting
+        that stale position. Movies and episodes still resume.
+        """
+        if str(getattr(media, "media_type", "") or "").lower() == "track":
+            media.resume_offset = 0
+            return 0
+        return max(0, int(getattr(media, "resume_offset", 0) or 0))
+
     def play(self, media: PlayableMedia) -> str:
         """Play the provided media using LibVLC with automatic fallbacks."""
         if self._current:
@@ -414,7 +429,7 @@ class PlaybackPanel(TransparentContainer):
         self._direct_url = media.stream_url
         self._browser_url = media.browser_url or media.stream_url
         self._is_paused = False
-        self._resume_offset = max(0, int(getattr(media, "resume_offset", 0) or 0))
+        self._resume_offset = self._start_offset(media)
         self._resume_applied = self._resume_offset == 0
 
         print(

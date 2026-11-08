@@ -1717,7 +1717,7 @@ class PlexService:
         browser_url = fallback_url or direct_url
         if not stream_url:
             return None
-        resume_offset = int(getattr(candidate, "viewOffset", 0) or 0)
+        resume_offset = self._start_offset(candidate)
         return PlayableMedia(
             title=title,
             media_type=media_type,
@@ -1756,11 +1756,23 @@ class PlexService:
                     return playable
         return None
 
+    @staticmethod
+    def _start_offset(node: PlexObject) -> int:
+        """Where a fresh play of ``node`` starts, in milliseconds.
+
+        Movies and episodes resume where they were left. A music track starts
+        from the beginning: Stop records the position, so resuming it made
+        Stop then Play behave like Pause then Play.
+        """
+        if str(getattr(node, "type", "") or "").lower() == "track":
+            return 0
+        return int(getattr(node, "viewOffset", 0) or 0)
+
     def _derive_stream_urls(self, node: PlexObject) -> tuple[Optional[str], Optional[str]]:
         server = self.ensure_server()
         direct_url: Optional[str] = None
         fallback_url: Optional[str] = None
-        resume_offset = int(getattr(node, "viewOffset", 0) or 0)
+        resume_offset = self._start_offset(node)
 
         media = getattr(node, "media", None)
         if media:
