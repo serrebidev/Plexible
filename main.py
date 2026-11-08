@@ -100,6 +100,7 @@ import wx
 from plex_client import i18n
 from plex_client.auth import AuthManager
 from plex_client.config import ConfigStore
+from plex_client.ui import wx_language
 from plex_client.ui.main_frame import MainFrame
 
 
@@ -117,6 +118,7 @@ def main() -> int:
     i18n.set_language(config.get_language())
     auth_manager = AuthManager(config)
     app = wx.App()
+    wx_language.install(i18n.get_language())
     restart_requested = []
     frame = MainFrame(config, auth_manager, on_restart_requested=lambda: restart_requested.append(True))
     frame.Show()

@@ -571,6 +571,7 @@ from .content_panel import (
 )
 from .navigation import NavigationTree
 from .playback import PlaybackPanel, SEEK_STEP_MS
+from .wx_language import menu_shortcut
 
 
 class MainFrame(wx.Frame):
@@ -708,37 +709,37 @@ class MainFrame(wx.Frame):
     def _build_menu(self) -> None:
         menu_bar = wx.MenuBar()
         file_menu = wx.Menu()
-        self._signin_item = file_menu.Append(wx.ID_ANY, _("Sign In...") + "\tCtrl+I")
+        self._signin_item = file_menu.Append(wx.ID_ANY, _("Sign In...") + menu_shortcut("Ctrl+I"))
         self._signout_item = file_menu.Append(wx.ID_ANY, _("Sign Out"))
         file_menu.AppendSeparator()
-        self._refresh_item = file_menu.Append(wx.ID_REFRESH, _("Refresh Libraries") + "\tF5")
-        self._search_item = file_menu.Append(wx.ID_FIND, _("Global Search...") + "\tCtrl+F")
+        self._refresh_item = file_menu.Append(wx.ID_REFRESH, _("Refresh Libraries") + menu_shortcut("F5"))
+        self._search_item = file_menu.Append(wx.ID_FIND, _("Global Search...") + menu_shortcut("Ctrl+F"))
         self._change_server_item = file_menu.Append(wx.ID_ANY, _("Change Server..."))
         file_menu.AppendSeparator()
-        exit_item = file_menu.Append(wx.ID_EXIT, _("Exit") + "\tCtrl+Q")
+        exit_item = file_menu.Append(wx.ID_EXIT, _("Exit") + menu_shortcut("Ctrl+Q"))
         menu_bar.Append(file_menu, _("&File"))
 
         player_menu = wx.Menu()
-        self._player_play_item = player_menu.Append(wx.ID_ANY, _("Play") + "\tSpace")
-        self._player_pause_item = player_menu.Append(wx.ID_ANY, _("Pause") + "\tShift+Space")
-        self._player_stop_item = player_menu.Append(wx.ID_STOP, _("Stop") + "\tCtrl+S")
-        self._player_prev_track_item = player_menu.Append(wx.ID_ANY, _("Previous Track") + "\tCtrl+[")
-        self._player_next_track_item = player_menu.Append(wx.ID_ANY, _("Next Track") + "\tCtrl+]")
+        self._player_play_item = player_menu.Append(wx.ID_ANY, _("Play") + menu_shortcut("Space"))
+        self._player_pause_item = player_menu.Append(wx.ID_ANY, _("Pause") + menu_shortcut("Shift+Space"))
+        self._player_stop_item = player_menu.Append(wx.ID_STOP, _("Stop") + menu_shortcut("Ctrl+S"))
+        self._player_prev_track_item = player_menu.Append(wx.ID_ANY, _("Previous Track") + menu_shortcut("Ctrl+["))
+        self._player_next_track_item = player_menu.Append(wx.ID_ANY, _("Next Track") + menu_shortcut("Ctrl+]"))
         player_menu.AppendSeparator()
-        self._player_rewind_item = player_menu.Append(wx.ID_ANY, _("Rewind 10s") + "\tCtrl+Left")
-        self._player_fast_forward_item = player_menu.Append(wx.ID_ANY, _("Fast Forward 10s") + "\tCtrl+Right")
+        self._player_rewind_item = player_menu.Append(wx.ID_ANY, _("Rewind 10s") + menu_shortcut("Ctrl+Left"))
+        self._player_fast_forward_item = player_menu.Append(wx.ID_ANY, _("Fast Forward 10s") + menu_shortcut("Ctrl+Right"))
         player_menu.AppendSeparator()
-        self._player_volume_up_item = player_menu.Append(wx.ID_ANY, _("Volume Up") + "\tCtrl+Up")
-        self._player_volume_down_item = player_menu.Append(wx.ID_ANY, _("Volume Down") + "\tCtrl+Down")
-        self._player_fullscreen_item = player_menu.AppendCheckItem(wx.ID_ANY, _("Fullscreen") + "\tF11")
-        self._player_mute_item = player_menu.AppendCheckItem(wx.ID_ANY, _("Mute") + "\tCtrl+0")
+        self._player_volume_up_item = player_menu.Append(wx.ID_ANY, _("Volume Up") + menu_shortcut("Ctrl+Up"))
+        self._player_volume_down_item = player_menu.Append(wx.ID_ANY, _("Volume Down") + menu_shortcut("Ctrl+Down"))
+        self._player_fullscreen_item = player_menu.AppendCheckItem(wx.ID_ANY, _("Fullscreen") + menu_shortcut("F11"))
+        self._player_mute_item = player_menu.AppendCheckItem(wx.ID_ANY, _("Mute") + menu_shortcut("Ctrl+0"))
         player_menu.AppendSeparator()
-        self._player_announce_item = player_menu.Append(wx.ID_ANY, _("Announce Playback State") + "\tCtrl+Shift+A")
+        self._player_announce_item = player_menu.Append(wx.ID_ANY, _("Announce Playback State") + menu_shortcut("Ctrl+Shift+A"))
         menu_bar.Append(player_menu, _("&Player"))
         self._player_menu = player_menu
 
         help_menu = wx.Menu()
-        self._dark_mode_item = help_menu.AppendCheckItem(wx.ID_ANY, _("Dark Mode") + "\tCtrl+Shift+D")
+        self._dark_mode_item = help_menu.AppendCheckItem(wx.ID_ANY, _("Dark Mode") + menu_shortcut("Ctrl+Shift+D"))
         self._dark_mode_item.Check(self._config.get_ui_theme() == "dark")
         help_menu.AppendSubMenu(self._build_language_menu(), _("La&nguage"))
         help_menu.AppendSeparator()
