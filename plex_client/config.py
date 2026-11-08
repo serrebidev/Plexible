@@ -260,6 +260,17 @@ class ConfigStore:
         if theme in ("light", "dark"):
             self.set("ui_theme", theme)
 
+    def get_language(self) -> str:
+        """Returns 'auto' (follow the system) or a language code such as 'fr'."""
+        value = self.get("language", "auto")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+        return "auto"
+
+    def set_language(self, language: str) -> None:
+        if isinstance(language, str) and language.strip():
+            self.set("language", language.strip().lower())
+
     def get_pending_entry(self, rating_key: str) -> Dict[str, int]:
         progress = self.get_pending_progress()
         return progress.get(str(rating_key), {})

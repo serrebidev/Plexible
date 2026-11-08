@@ -101,3 +101,14 @@ def test_explicit_profile_does_not_import_legacy_account(tmp_path, monkeypatch):
     monkeypatch.setattr(ConfigStore, "LEGACY_DIR", legacy)
     monkeypatch.setenv("PLEXIBLE_CONFIG_DIR", str(tmp_path / "new-profile"))
     assert ConfigStore().get_auth_token() is None
+
+
+def test_language_defaults_to_system_and_persists(tmp_path, monkeypatch):
+    from plex_client.config import ConfigStore
+
+    monkeypatch.setenv("PLEXIBLE_CONFIG_DIR", str(tmp_path))
+    store = ConfigStore()
+    assert store.get_language() == "auto"
+
+    store.set_language("fr")
+    assert ConfigStore().get_language() == "fr"

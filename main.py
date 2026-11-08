@@ -97,18 +97,35 @@ ensure_requirements_installed()
 
 import wx
 
+from plex_client import i18n
 from plex_client.auth import AuthManager
 from plex_client.config import ConfigStore
 from plex_client.ui.main_frame import MainFrame
 
 
+def relaunch() -> None:
+    """Start a fresh Plexible process with the same arguments."""
+    if getattr(sys, "frozen", False):
+        args = [sys.executable, *sys.argv[1:]]
+    else:
+        args = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
+    subprocess.Popen(args, close_fds=True)
+
+
 def main() -> int:
     config = ConfigStore()
+    i18n.set_language(config.get_language())
     auth_manager = AuthManager(config)
     app = wx.App()
-    frame = MainFrame(config, auth_manager)
+    restart_requested = []
+    frame = MainFrame(config, auth_manager, on_restart_requested=lambda: restart_requested.append(True))
     frame.Show()
-    return app.MainLoop()
+    result = app.MainLoop()
+    # Relaunch only after the window has closed and saved playback progress,
+    # so the two processes never write config.json at the same time.
+    if restart_requested:
+        relaunch()
+    return result
 
 
 if __name__ == "__main__":

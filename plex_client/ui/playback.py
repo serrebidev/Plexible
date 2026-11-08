@@ -19,6 +19,7 @@ import wx
 
 from .. import screen_reader
 from ..config import ConfigStore
+from ..i18n import _
 from ..plex_service import PlayableMedia
 from .content_panel import (
     DecorativePanel,
@@ -184,7 +185,7 @@ class PlaybackPanel(TransparentContainer):
         on_skip: Optional[Callable[[int], None]] = None,
     ) -> None:
         super().__init__(parent)
-        self.SetAccessible(NamedAccessible("Playback Panel", "pane"))
+        self.SetAccessible(NamedAccessible(_("Playback Panel"), "pane"))
         self._config = config
         self._current: Optional[PlayableMedia] = None
         self._direct_url: Optional[str] = None
@@ -226,8 +227,8 @@ class PlaybackPanel(TransparentContainer):
         self._queue_activate_callback = on_queue_activate
         self._skip_callback = on_skip
 
-        self._header = wx.StaticText(self, label="Nothing is playing.")
-        self._header.SetName("Playback Status")
+        self._header = wx.StaticText(self, label=_("Nothing is playing."))
+        self._header.SetName(_("Playback Status"))
         header_font = self._header.GetFont()
         header_font.SetPointSize(header_font.GetPointSize() + 1)
         self._header.SetFont(header_font)
@@ -239,32 +240,32 @@ class PlaybackPanel(TransparentContainer):
         # SetCanFocus(False) is a no-op on a plain wx.Panel under MSW, which is why
         # this used to appear in the Tab cycle as an unlabelled pane.
         self._header_sep = DecorativePanel(self, size=(-1, 1))
-        self._header_sep.SetName("Playback Separator")
+        self._header_sep.SetName(_("Playback Separator"))
         self._header_sep.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_3DLIGHT))
 
         # Transport controls + volume  (color-coded: green=play, amber=pause, red=stop)
         controls_bar = wx.BoxSizer(wx.HORIZONTAL)
-        self._play_btn = wx.Button(self, wx.ID_APPLY, label="Play")
-        self._play_btn.SetName("Play")
+        self._play_btn = wx.Button(self, wx.ID_APPLY, label=_("Play"))
+        self._play_btn.SetName(_("Play"))
         self._play_btn.SetBackgroundColour(wx.Colour(46, 125, 50))
         self._play_btn.SetForegroundColour(wx.WHITE)
-        self._pause_btn = wx.Button(self, wx.ID_ANY, label="Pause")
-        self._pause_btn.SetName("Pause")
+        self._pause_btn = wx.Button(self, wx.ID_ANY, label=_("Pause"))
+        self._pause_btn.SetName(_("Pause"))
         self._pause_btn.SetBackgroundColour(wx.Colour(245, 127, 23))
         self._pause_btn.SetForegroundColour(wx.BLACK)
-        self._stop_btn = wx.Button(self, wx.ID_STOP, label="Stop")
-        self._stop_btn.SetName("Stop")
+        self._stop_btn = wx.Button(self, wx.ID_STOP, label=_("Stop"))
+        self._stop_btn.SetName(_("Stop"))
         self._stop_btn.SetBackgroundColour(wx.Colour(198, 40, 40))
         self._stop_btn.SetForegroundColour(wx.WHITE)
-        self._prev_btn = wx.Button(self, wx.ID_ANY, label="⏮ Prev")
-        self._prev_btn.SetName("Previous track")
-        self._prev_btn.SetToolTip("Previous track")
-        self._next_btn = wx.Button(self, wx.ID_ANY, label="Next ⏭")
-        self._next_btn.SetName("Next track")
-        self._next_btn.SetToolTip("Next track")
-        self._mute_btn = wx.ToggleButton(self, wx.ID_ANY, label="Mute")
+        self._prev_btn = wx.Button(self, wx.ID_ANY, label=_("⏮ Prev"))
+        self._prev_btn.SetName(_("Previous track"))
+        self._prev_btn.SetToolTip(_("Previous track"))
+        self._next_btn = wx.Button(self, wx.ID_ANY, label=_("Next ⏭"))
+        self._next_btn.SetName(_("Next track"))
+        self._next_btn.SetToolTip(_("Next track"))
+        self._mute_btn = wx.ToggleButton(self, wx.ID_ANY, label=_("Mute"))
         # Without this NVDA announces the wx default name ("check").
-        self._mute_btn.SetName("Mute")
+        self._mute_btn.SetName(_("Mute"))
         # Consistent minimum widths for transport buttons
         for btn in (self._play_btn, self._pause_btn, self._stop_btn):
             btn.SetMinSize((90, -1))
@@ -284,20 +285,20 @@ class PlaybackPanel(TransparentContainer):
         controls_bar.Add(self._prev_btn, 0, wx.RIGHT, 4)
         controls_bar.Add(self._next_btn, 0, wx.RIGHT, 12)
         controls_bar.Add(self._mute_btn, 0, wx.RIGHT, 6)
-        vol_label = wx.StaticText(self, label="Volume:")
-        vol_label.SetName("Volume Label")
+        vol_label = wx.StaticText(self, label=_("Volume:"))
+        vol_label.SetName(_("Volume Label"))
         controls_bar.Add(vol_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self._volume_slider = wx.Slider(self, value=self._volume, minValue=0, maxValue=100, size=(160, -1))
         # Native trackbars ignore SetName for MSAA, so name them properly.
-        self._volume_accessible = name_control(self._volume_slider, "Volume", "slider")
-        self._volume_slider.SetToolTip("Volume level")
+        self._volume_accessible = name_control(self._volume_slider, _("Volume"), "slider")
+        self._volume_slider.SetToolTip(_("Volume level"))
         self._volume_slider.Bind(wx.EVT_SLIDER, self._on_volume_slider)
         controls_bar.Add(self._volume_slider, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         self._volume_label = wx.StaticText(self, label="")
-        self._volume_label.SetName("Volume Level")
+        self._volume_label.SetName(_("Volume Level"))
         controls_bar.Add(self._volume_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        self._fullscreen_btn = wx.ToggleButton(self, wx.ID_ANY, label="Fullscreen")
-        self._fullscreen_btn.SetName("Toggle Fullscreen")
+        self._fullscreen_btn = wx.ToggleButton(self, wx.ID_ANY, label=_("Fullscreen"))
+        self._fullscreen_btn.SetName(_("Toggle Fullscreen"))
         self._fullscreen_btn.Enable(False)
         self._fullscreen_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_fullscreen_toggled)
         self._fullscreen_btn.Bind(wx.EVT_CHAR_HOOK, self._handle_fullscreen_char)
@@ -305,10 +306,10 @@ class PlaybackPanel(TransparentContainer):
         controls_bar.AddStretchSpacer()
 
         self._seek_slider = wx.Slider(self, value=0, minValue=0, maxValue=1, style=wx.SL_HORIZONTAL)
-        self._seek_accessible = name_control(self._seek_slider, "Seek", "slider")
-        self._seek_slider.SetToolTip("Playback position")
-        seek_label = wx.StaticText(self, label="Seek:")
-        seek_label.SetName("Seek Label")
+        self._seek_accessible = name_control(self._seek_slider, _("Seek"), "slider")
+        self._seek_slider.SetToolTip(_("Playback position"))
+        seek_label = wx.StaticText(self, label=_("Seek:"))
+        seek_label.SetName(_("Seek Label"))
         self._seek_slider.Disable()
         self._seek_slider.Bind(wx.EVT_SCROLL_THUMBTRACK, self._on_seek_slider_track)
         self._seek_slider.Bind(wx.EVT_SCROLL_THUMBRELEASE, self._on_seek_slider_release)
@@ -319,19 +320,19 @@ class PlaybackPanel(TransparentContainer):
         # to operate there with a keyboard, so it stays out of the Tab cycle.
         # Fullscreen, seek and the transport buttons are the real controls.
         self._video_panel = DecorativePanel(self)
-        self._video_panel.SetAccessible(NamedAccessible("Video Surface", "pane"))
+        self._video_panel.SetAccessible(NamedAccessible(_("Video Surface"), "pane"))
         self._video_panel.SetBackgroundColour(wx.BLACK)
         self._active_video_window = self._video_panel
 
         self._queue_panel = TransparentContainer(self)
-        self._queue_panel.SetAccessible(NamedAccessible("Queue Panel", "pane"))
-        queue_box_widget = wx.StaticBox(self._queue_panel, label="Current Queue")
+        self._queue_panel.SetAccessible(NamedAccessible(_("Queue Panel"), "pane"))
+        queue_box_widget = wx.StaticBox(self._queue_panel, label=_("Current Queue"))
         queue_box = wx.StaticBoxSizer(queue_box_widget, wx.VERTICAL)
         self._queue_tree = wx.TreeCtrl(
             queue_box_widget,
             style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_SINGLE,
         )
-        self._queue_accessible = name_control(self._queue_tree, "Current Queue", "tree")
+        self._queue_accessible = name_control(self._queue_tree, _("Current Queue"), "tree")
         self._queue_tree.SetMinSize((0, 150))
         self._queue_root = self._queue_tree.AddRoot("Queue Root")
         self._queue_tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self._on_queue_item_activated)
@@ -444,10 +445,10 @@ class PlaybackPanel(TransparentContainer):
             self._handle_playback_start(mode)
             return mode
 
-        self._header.SetLabel("Unable to start playback for this item.")
+        self._header.SetLabel(_("Unable to start playback for this item."))
         wx.MessageBox(
-            "Plexible could not start LibVLC playback for this item.",
-            "Playback Error",
+            _("Plexible could not start LibVLC playback for this item."),
+            _("Playback Error"),
             wx.ICON_WARNING | wx.OK,
             parent=self,
         )
@@ -484,7 +485,7 @@ class PlaybackPanel(TransparentContainer):
             for idx, plex_item in enumerate(self._queue_items):
                 path = self._queue_path_for_item(plex_item, idx)
                 if not path:
-                    path = [f"{idx + 1:02d}. Item"]
+                    path = [_("{number:02d}. Item", number=idx + 1)]
                 parent = self._queue_root
                 prefix: list[str] = []
                 for depth, segment in enumerate(path):
@@ -638,7 +639,7 @@ class PlaybackPanel(TransparentContainer):
 
     def _queue_path_for_item(self, plex_item: object, queue_index: int) -> List[str]:
         media_type = self._coerce_label(getattr(plex_item, "type", "")).lower()
-        title = self._coerce_label(getattr(plex_item, "title", "")) or f"Item {queue_index + 1}"
+        title = self._coerce_label(getattr(plex_item, "title", "")) or _("Item {number}", number=queue_index + 1)
         path: List[str] = []
         if media_type == "episode":
             show = self._coerce_label(getattr(plex_item, "grandparentTitle", ""))
@@ -646,7 +647,7 @@ class PlaybackPanel(TransparentContainer):
                 path.append(show)
             season_value = getattr(plex_item, "parentIndex", None)
             if season_value not in (None, "", "-1"):
-                path.append(self._format_number_label("Season ", season_value))
+                path.append(_("Season {number}", number=self._format_number_label("", season_value)))
             episode_value = getattr(plex_item, "index", None)
             code_parts: List[str] = []
             if season_value not in (None, "", "-1"):
@@ -721,7 +722,7 @@ class PlaybackPanel(TransparentContainer):
         self._notify_timeline_state("stopped", final_position, duration, sync=True)
         # Announce before clearing _current so we can mention the title
         if self._current:
-            self._announce_accessible(f"Stopped: {self._current.title}")
+            self._announce_accessible(_("Stopped: {title}", title=self._current.title))
         self._halt_current_playback()
         self._current = None
         self._direct_url = None
@@ -730,7 +731,7 @@ class PlaybackPanel(TransparentContainer):
         self._resume_offset = 0
         self._resume_applied = False
         self._pre_fullscreen_focus = None
-        self._header.SetLabel("Nothing is playing.")
+        self._header.SetLabel(_("Nothing is playing."))
         self._set_mode("stopped")
 
     def resume(self) -> bool:
@@ -739,14 +740,14 @@ class PlaybackPanel(TransparentContainer):
         if self._mode == "libvlc" and self._vlc_player:
             self._vlc_player.set_pause(False)
             self._is_paused = False
-            self._header.SetLabel(f"Playing (LibVLC): {self._current.title}")
+            self._header.SetLabel(_("Playing (LibVLC): {title}", title=self._current.title))
             self._start_timeline_poll()
             try:
                 position = int(self._vlc_player.get_time())
             except Exception:
                 position = 0
             self._notify_timeline_state("playing", position, self._current_duration())
-            self._announce_accessible("Resumed")
+            self._announce_accessible(_("Resumed"))
         else:
             return False
         self._notify_state()
@@ -758,14 +759,14 @@ class PlaybackPanel(TransparentContainer):
         if self._mode == "libvlc" and self._vlc_player:
             self._vlc_player.set_pause(True)
             self._is_paused = True
-            self._header.SetLabel(f"Paused (LibVLC): {self._current.title}")
+            self._header.SetLabel(_("Paused (LibVLC): {title}", title=self._current.title))
             try:
                 position = int(self._vlc_player.get_time())
             except Exception:
                 position = 0
             self._cancel_timeline_poll()
             self._notify_timeline_state("paused", position, self._current_duration())
-            self._announce_accessible("Paused")
+            self._announce_accessible(_("Paused"))
         else:
             return False
         self._notify_state()
@@ -842,11 +843,11 @@ class PlaybackPanel(TransparentContainer):
 
     # ----------------------------------------------------------------- Event handlers
 
-    def _open_stream_externally(self, _: wx.CommandEvent) -> None:
+    def _open_stream_externally(self, _event: wx.CommandEvent) -> None:
         url = self._direct_url or self._browser_url
         if not url:
             wx.MessageBox(
-                "No stream URL is available for this item.",
+                _("No stream URL is available for this item."),
                 "Plexible",
                 wx.ICON_WARNING | wx.OK,
                 parent=self,
@@ -933,25 +934,25 @@ class PlaybackPanel(TransparentContainer):
                 return
         event.Skip()
 
-    def _on_play_clicked(self, _: wx.CommandEvent) -> None:
+    def _on_play_clicked(self, _event: wx.CommandEvent) -> None:
         if not self.resume():
             wx.Bell()
 
-    def _on_pause_clicked(self, _: wx.CommandEvent) -> None:
+    def _on_pause_clicked(self, _event: wx.CommandEvent) -> None:
         if not self.pause():
             wx.Bell()
 
-    def _on_stop_clicked(self, _: wx.CommandEvent) -> None:
+    def _on_stop_clicked(self, _event: wx.CommandEvent) -> None:
         if not self.stop_playback():
             wx.Bell()
 
-    def _on_prev_clicked(self, _: wx.CommandEvent) -> None:
+    def _on_prev_clicked(self, _event: wx.CommandEvent) -> None:
         if self._skip_callback:
             self._skip_callback(-1)
         else:
             wx.Bell()
 
-    def _on_next_clicked(self, _: wx.CommandEvent) -> None:
+    def _on_next_clicked(self, _event: wx.CommandEvent) -> None:
         if self._skip_callback:
             self._skip_callback(1)
         else:
@@ -971,7 +972,7 @@ class PlaybackPanel(TransparentContainer):
             self._fullscreen_btn.SetValue(self._fullscreen)
             wx.Bell()
 
-    def _on_volume_slider(self, _: wx.CommandEvent) -> None:
+    def _on_volume_slider(self, _event: wx.CommandEvent) -> None:
         self.set_volume(self._volume_slider.GetValue(), update_slider=False)
 
     def _on_destroy(self, event: wx.WindowDestroyEvent) -> None:
@@ -1102,7 +1103,7 @@ class PlaybackPanel(TransparentContainer):
         if not (self._direct_url or self._browser_url):
             if force_message:
                 wx.MessageBox(
-                    "No stream URL is available for LibVLC playback.",
+                    _("No stream URL is available for LibVLC playback."),
                     "Plexible",
                     wx.ICON_WARNING | wx.OK,
                     parent=self,
@@ -1111,7 +1112,7 @@ class PlaybackPanel(TransparentContainer):
         if not self._ensure_libvlc():
             if force_message and not self._libvlc_warning_shown:
                 wx.MessageBox(
-                    "LibVLC is not available. Install VLC and ensure python-vlc can locate it.",
+                    _("LibVLC is not available. Install VLC and ensure python-vlc can locate it."),
                     "Plexible",
                     wx.ICON_WARNING | wx.OK,
                     parent=self,
@@ -1126,9 +1127,9 @@ class PlaybackPanel(TransparentContainer):
             if not stream_source:
                 if force_message:
                     message = (
-                        "LibVLC was unable to start playback for this item."
+                        _("LibVLC was unable to start playback for this item.")
                         if attempted
-                        else "LibVLC could not find a playable stream for this item."
+                        else _("LibVLC could not find a playable stream for this item.")
                     )
                     wx.MessageBox(
                         message,
@@ -1194,10 +1195,12 @@ class PlaybackPanel(TransparentContainer):
         self._libvlc_active_source = stream_source
         self._vlc_player.audio_set_volume(self._volume)  # type: ignore[union-attr]
         self._vlc_player.audio_set_mute(self._muted)  # type: ignore[union-attr]
-        label_suffix = " (HLS)" if descriptor == "HLS" else " (Direct)"
-        self._header.SetLabel(
-            f"Playing (LibVLC){label_suffix}: {self._current.title if self._current else 'Media'}"
-        )
+        header_title = self._current.title if self._current else _("Media")
+        if descriptor == "HLS":
+            header_label = _("Playing (LibVLC) (HLS): {title}", title=header_title)
+        else:
+            header_label = _("Playing (LibVLC) (Direct): {title}", title=header_title)
+        self._header.SetLabel(header_label)
         self._show_libvlc(True)
         self._resume_applied = self._resume_offset == 0
         self._attach_libvlc_events()
@@ -1328,7 +1331,7 @@ class PlaybackPanel(TransparentContainer):
                         return self._ensure_libvlc()
                     if not self._libvlc_warning_shown:
                         wx.MessageBox(
-                            "LibVLC could not be initialised. Install the VLC version matching this Python build (32-bit vs 64-bit) or select the correct VLC folder when prompted.",
+                            _("LibVLC could not be initialised. Install the VLC version matching this Python build (32-bit vs 64-bit) or select the correct VLC folder when prompted."),
                             "Plexible",
                             wx.ICON_WARNING | wx.OK,
                             parent=self,
@@ -1429,12 +1432,12 @@ class PlaybackPanel(TransparentContainer):
         self._libvlc_active_source = None
         if alert_user:
             wx.MessageBox(
-                "LibVLC could not play this item.",
+                _("LibVLC could not play this item."),
                 "Plexible",
                 wx.ICON_WARNING | wx.OK,
                 parent=self,
             )
-        self._header.SetLabel("Unable to start playback.")
+        self._header.SetLabel(_("Unable to start playback."))
         self._set_mode("stopped")
         self._notify_timeline_reset()
 
@@ -1466,7 +1469,7 @@ class PlaybackPanel(TransparentContainer):
 
     def _update_volume_controls(self) -> None:
         self._mute_btn.SetValue(self._muted)
-        label = "Muted" if self._muted or self._volume == 0 else f"{self._volume}%"
+        label = _("Muted") if self._muted or self._volume == 0 else _("{volume}%", volume=self._volume)
         self._volume_label.SetLabel(label)
         if not self._volume_control_available():
             self._volume_slider.SetValue(self._volume)
@@ -1886,31 +1889,31 @@ class PlaybackPanel(TransparentContainer):
         dll = dir_path / "libvlc.dll"
         core = dir_path / "libvlccore.dll"
         if not dll.exists() or not core.exists():
-            return False, "Selected folder does not contain libvlc.dll and libvlccore.dll."
+            return False, _("Selected folder does not contain libvlc.dll and libvlccore.dll.")
         python_32 = sys.maxsize <= 2**32
         python_64 = not python_32
         if python_32 and "Program Files (x86)" not in str(dir_path) and "Program Files" in str(dir_path):
             return (
                 False,
-                "This Python build is 32-bit. Please select the 32-bit VLC installation (Program Files (x86)\\VideoLAN\\VLC).",
+                _("This Python build is 32-bit. Please select the 32-bit VLC installation (Program Files (x86)\\VideoLAN\\VLC)."),
             )
         if python_64 and "Program Files (x86)" in str(dir_path):
             return (
                 False,
-                "This Python build is 64-bit. Please select the 64-bit VLC installation (Program Files\\VideoLAN\\VLC).",
+                _("This Python build is 64-bit. Please select the 64-bit VLC installation (Program Files\\VideoLAN\\VLC)."),
             )
         return True, None
 
     def _prompt_for_vlc_path(self) -> bool:
         if self._vlc_notified_missing:
             return False
-        dlg = wx.DirDialog(self, "Select the VLC installation directory", style=wx.DD_DEFAULT_STYLE)
+        dlg = wx.DirDialog(self, _("Select the VLC installation directory"), style=wx.DD_DEFAULT_STYLE)
         try:
             if dlg.ShowModal() == wx.ID_OK:
                 path = Path(dlg.GetPath())
                 valid, message = self._validate_vlc_directory(path)
                 if not valid:
-                    wx.MessageBox(message or "Invalid VLC installation directory.", "Plexible", wx.ICON_WARNING | wx.OK, parent=self)
+                    wx.MessageBox(message or _("Invalid VLC installation directory."), "Plexible", wx.ICON_WARNING | wx.OK, parent=self)
                     return False
                 self._config.set_vlc_path(str(path))
                 self._vlc_path_cache = None

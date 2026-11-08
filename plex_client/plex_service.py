@@ -20,6 +20,7 @@ from plexapi.playqueue import PlayQueue
 from plexapi.server import PlexServer
 
 from .config import ConfigStore
+from .i18n import _, N_, ngettext
 
 
 @dataclass
@@ -143,20 +144,20 @@ _MEDIA_HUB_TYPES = frozenset(
 )
 
 _RADIO_DISPLAY_NAMES: Dict[str, str] = {
-    "library_radio": "Library Radio",
-    "time_travel_radio": "Time Travel Radio",
-    "random_album_radio": "Random Album Radio",
-    "genre_radio": "Genre Radio",
-    "style_radio": "Style Radio",
-    "mood_radio": "Mood Radio",
-    "decade_radio": "Decade Radio",
-    "artist_mix_builder": "Artist Mix Builder",
-    "album_mix_builder": "Album Mix Builder",
-    "sonic_adventure": "Sonic Adventure",
-    "deep_cuts_radio": "Deep Cuts Radio",
-    "artist_radio": "Artist Radio",
-    "album_radio": "Album Radio",
-    "track_radio": "Track Radio",
+    "library_radio": N_("Library Radio"),
+    "time_travel_radio": N_("Time Travel Radio"),
+    "random_album_radio": N_("Random Album Radio"),
+    "genre_radio": N_("Genre Radio"),
+    "style_radio": N_("Style Radio"),
+    "mood_radio": N_("Mood Radio"),
+    "decade_radio": N_("Decade Radio"),
+    "artist_mix_builder": N_("Artist Mix Builder"),
+    "album_mix_builder": N_("Album Mix Builder"),
+    "sonic_adventure": N_("Sonic Adventure"),
+    "deep_cuts_radio": N_("Deep Cuts Radio"),
+    "artist_radio": N_("Artist Radio"),
+    "album_radio": N_("Album Radio"),
+    "track_radio": N_("Track Radio"),
 }
 
 # Plex search type ids used by the letter (firstCharacter) endpoints.
@@ -172,35 +173,112 @@ _CONNECT_PENDING = object()
 _MUSIC_CATEGORY_DEFINITIONS: Tuple[Tuple[str, str, str], ...] = (
     (
         "recently_added",
-        "Recently Added",
-        "Latest albums and songs added to this library.",
+        N_("Recently Added"),
+        N_("Latest albums and songs added to this library."),
     ),
     (
         "radios",
-        "Radios",
-        "Plex radio stations and mixes available for this music library.",
+        N_("Radios"),
+        N_("Plex radio stations and mixes available for this music library."),
     ),
     (
         "artists",
-        "Artists",
-        "Browse all artists in this library.",
+        N_("Artists"),
+        N_("Browse all artists in this library."),
     ),
     (
         "albums",
-        "Albums",
-        "Browse every album in this library.",
+        N_("Albums"),
+        N_("Browse every album in this library."),
     ),
     (
         "tracks",
-        "Songs",
-        "Browse all songs in this library.",
+        N_("Songs"),
+        N_("Browse all songs in this library."),
     ),
     (
         "playlists",
-        "Playlists",
-        "Audio playlists that include music from this server.",
+        N_("Playlists"),
+        N_("Audio playlists that include music from this server."),
     ),
 )
+
+
+# Labels for the "Browse All" bucket and the letter buckets of each music category.
+# They depend on the category, so each one is written out as a whole sentence.
+def _browse_all_texts(category: str, count: int) -> Tuple[str, str]:
+    if category == "artists":
+        title = _("Browse All Artists ({count})", count=count)
+        summary = ngettext(
+            "Browse all {count} artist without letter groupings.",
+            "Browse all {count} artists without letter groupings.",
+            count,
+        )
+    elif category == "albums":
+        title = _("Browse All Albums ({count})", count=count)
+        summary = ngettext(
+            "Browse all {count} album without letter groupings.",
+            "Browse all {count} albums without letter groupings.",
+            count,
+        )
+    elif category == "tracks":
+        title = _("Browse All Songs ({count})", count=count)
+        summary = ngettext(
+            "Browse all {count} song without letter groupings.",
+            "Browse all {count} songs without letter groupings.",
+            count,
+        )
+    else:
+        title = _("Browse All ({count})", count=count)
+        summary = ngettext(
+            "Browse all {count} item without letter groupings.",
+            "Browse all {count} items without letter groupings.",
+            count,
+        )
+    return title, summary
+
+
+def _letter_bucket_texts(libtype: str, letter: str, count: int) -> Tuple[str, str]:
+    """Return (title, summary) for a letter bucket such as "A · 12 artists"."""
+    if libtype == "artist":
+        title = ngettext("{letter} · {count} artist", "{letter} · {count} artists", count, letter=letter)
+        summary = ngettext(
+            "{count} artist starting with '{letter}'",
+            "{count} artists starting with '{letter}'",
+            count,
+            letter=letter,
+        )
+    elif libtype == "album":
+        title = ngettext("{letter} · {count} album", "{letter} · {count} albums", count, letter=letter)
+        summary = ngettext(
+            "{count} album starting with '{letter}'",
+            "{count} albums starting with '{letter}'",
+            count,
+            letter=letter,
+        )
+    elif libtype == "track":
+        title = ngettext("{letter} · {count} track", "{letter} · {count} tracks", count, letter=letter)
+        summary = ngettext(
+            "{count} track starting with '{letter}'",
+            "{count} tracks starting with '{letter}'",
+            count,
+            letter=letter,
+        )
+    else:
+        title = ngettext("{letter} · {count} item", "{letter} · {count} items", count, letter=letter)
+        summary = ngettext(
+            "{count} item starting with '{letter}'",
+            "{count} items starting with '{letter}'",
+            count,
+            letter=letter,
+        )
+    return (title if count else letter), summary
+
+
+def _radio_display_name(key: Optional[str], default: str = "") -> str:
+    """Translated display name of a radio type, or ``default`` when unknown."""
+    name = _RADIO_DISPLAY_NAMES.get(key or "")
+    return _(name) if name else default
 
 
 class PlexService:
@@ -295,7 +373,7 @@ class PlexService:
         for entry in discovered:
             data = entry.get("data", entry)
             results.append({
-                "name": data.get("Name", "Unknown"),
+                "name": data.get("Name") or _("Unknown"),
                 "host": data.get("Host", entry.get("host", "")),
                 "port": int(data.get("Port", entry.get("port", 32400))),
                 "clientIdentifier": data.get("Client-Identifier", data.get("Resource-Identifier", "")),
@@ -305,7 +383,7 @@ class PlexService:
     def connect(self, identifier: Optional[str] = None) -> PlexServer:
         servers = self.available_servers()
         if not servers:
-            raise RuntimeError("No Plex servers are available for this account.")
+            raise RuntimeError(_("No Plex servers are available for this account."))
 
         def normalize(value: Optional[str]) -> Optional[str]:
             if not isinstance(value, str):
@@ -384,7 +462,7 @@ class PlexService:
         prefer_local: bool = True,
         reason: str = "connect",
     ) -> PlexServer:
-        name = resource.name or resource.clientIdentifier or "Plex Server"
+        name = resource.name or resource.clientIdentifier or _("Plex Server")
         attempts: List[Tuple[str, Dict[str, Optional[object]]]] = []
         base_locations = ["local", "remote", "relay"]
         base_timeout = 8
@@ -424,7 +502,7 @@ class PlexService:
                 time.sleep(delay)
         if last_exc:
             raise last_exc
-        raise RuntimeError(f"Unable to connect to Plex resource '{name}'.")
+        raise RuntimeError(_("Unable to connect to Plex resource '{name}'.", name=name))
 
     def _connect_resource_quickly(
         self,
@@ -445,7 +523,7 @@ class PlexService:
             return self._call_with_supported_kwargs(resource.connect, ssl=ssl, timeout=timeout, locations=locations)
         urls = list(resource.preferred_connections(ssl=ssl, locations=locations))
         if not urls:
-            raise NotFound(f"Unable to connect to resource: {resource.name}")
+            raise NotFound(_("Unable to connect to resource: {name}", name=resource.name))
         session = getattr(getattr(resource, "_server", None), "_session", None)
         outcomes: List[object] = [_CONNECT_PENDING] * len(urls)
         changed = threading.Condition()
@@ -480,7 +558,7 @@ class PlexService:
                     wait_for = min(wait_for, first_success_at + _CONNECT_GRACE_SECONDS - now)
                 changed.wait(timeout=max(0.01, wait_for))
         failures = [o for o in outcomes if isinstance(o, BaseException)]
-        raise NotFound(f"Unable to connect to resource: {resource.name}") from (failures[-1] if failures else None)
+        raise NotFound(_("Unable to connect to resource: {name}", name=resource.name)) from (failures[-1] if failures else None)
 
     @staticmethod
     def _is_connection(outcome: object) -> bool:
@@ -744,8 +822,8 @@ class PlexService:
             categories.append(
                 MusicCategory(
                     identifier=category_id,
-                    title=title,
-                    summary=summary,
+                    title=_(title),
+                    summary=_(summary),
                     category=ident,
                     section=section,
                     key=category_id,
@@ -800,22 +878,22 @@ class PlexService:
         buckets: List[MusicAlphaBucket] = []
         libtype_map = {"artists": "artist", "albums": "album", "tracks": "track"}
         libtype = libtype_map.get(category, category.rstrip("s"))
-        category_display = {"artists": "artists", "albums": "albums", "tracks": "songs"}.get(category, category)
 
         if characters:
             # Add a "Browse All" bucket at the top for direct flat browsing
             total_count = sum(int(getattr(c, "size", 0) or 0) for c in characters)
             browse_all_key = f"{cache_key}:browse_all"
+            browse_all_title, browse_all_summary = _browse_all_texts(category, total_count)
             buckets.append(
                 MusicAlphaBucket(
                     identifier=browse_all_key,
-                    title=f"Browse All {category_display.title()} ({total_count})",
+                    title=browse_all_title,
                     key="__browse_all__",
                     category=category,
                     libtype=libtype,
                     section=section,
                     count=total_count,
-                    summary=f"Browse all {total_count} {category_display} without letter groupings.",
+                    summary=browse_all_summary,
                     character="",
                 )
             )
@@ -830,8 +908,7 @@ class PlexService:
                 raw_title = str(getattr(character, "title", "")) or "#"
                 count = int(getattr(character, "size", 0) or 0)
                 bucket_id = f"{cache_key}:{raw_title}"
-                summary = f"{count} {libtype}{'s' if count != 1 else ''} starting with '{raw_title}'"
-                display_title = f"{raw_title} · {count} {libtype}{'s' if count != 1 else ''}" if count else raw_title
+                display_title, summary = _letter_bucket_texts(libtype, raw_title, count)
                 buckets.append(
                     MusicAlphaBucket(
                         identifier=bucket_id,
@@ -1220,14 +1297,17 @@ class PlexService:
         combined = " ".join(texts).lower()
         for key, keywords in _RADIO_KEYWORDS.items():
             if any(fragment in combined for fragment in keywords):
-                display = _RADIO_DISPLAY_NAMES.get(key, key.replace("_", " ").title())
+                display = _radio_display_name(key, key.replace("_", " ").title())
                 return display, key
         fallback_candidates = [
             getattr(hub, "title", None) if hub is not None else None,
             getattr(item, "librarySectionTitle", None),
             getattr(item, "playlistType", None),
         ]
-        fallback = next((candidate for candidate in fallback_candidates if candidate), "Stations")
+        fallback = next((candidate for candidate in fallback_candidates if candidate), None)
+        if fallback is None:
+            # The type code stays English; only the shown category is translated.
+            return _("Stations"), "stations"
         normalized = fallback.lower().replace(" ", "_")
         if not normalized:
             normalized = "station"
@@ -1336,7 +1416,7 @@ class PlexService:
                 station_type,
             ]
             identifier = "::".join(part for part in identifier_parts if part)
-            summary = getattr(item, "summary", "") or _RADIO_DISPLAY_NAMES.get(station_type, "")
+            summary = getattr(item, "summary", "") or _radio_display_name(station_type)
             section_id = self._normalize_section_id(
                 getattr(item, "librarySectionID", None)
                 or getattr(section, "librarySectionID", None)
@@ -1348,7 +1428,7 @@ class PlexService:
                 summary=summary,
                 key=key,
                 station_type=station_type,
-                category=category or "Stations",
+                category=category or _("Stations"),
                 library_section_id=section_id,
                 hub_title=getattr(hub_ref, "title", "") or category,
                 hub_context=getattr(hub_ref, "context", "") or station_type,
@@ -1396,9 +1476,9 @@ class PlexService:
             getattr(section, "librarySectionID", None) or getattr(section, "key", None)
         ) or "music"
         descriptors = [
-            ("library_radio", "Library Radio", "Shuffle your entire library with endless related tracks."),
-            ("recent_radio", "Recently Added Radio", "Focus on the newest music while mixing in related songs."),
-            ("shuffle_radio", "Deep Shuffle Radio", "Go deep into the catalogue with an always-changing mix."),
+            ("library_radio", _("Library Radio"), _("Shuffle your entire library with endless related tracks.")),
+            ("recent_radio", _("Recently Added Radio"), _("Focus on the newest music while mixing in related songs.")),
+            ("shuffle_radio", _("Deep Shuffle Radio"), _("Go deep into the catalogue with an always-changing mix.")),
         ]
         # No server queries here: these options are listed every time a music item
         # is selected or starts playing, and sampling seed tracks for all three
@@ -1410,7 +1490,7 @@ class PlexService:
                     id=f"synthetic:{mode}:{section_id}",
                     label=label,
                     description=description,
-                    category="Stations",
+                    category=_("Stations"),
                     action=f"{mode}",
                     data={"section": section, "mode": mode, "seed_rating_key": None},
                 )
@@ -1425,7 +1505,7 @@ class PlexService:
         seed_rating_key: Optional[str] = None,
     ) -> tuple[PlayableMedia, RadioSession]:
         if section is None:
-            raise RuntimeError("Music section is unavailable for radio playback.")
+            raise RuntimeError(_("Music section is unavailable for radio playback."))
         seed: Optional[PlexObject] = None
         if seed_rating_key:
             try:
@@ -1437,7 +1517,7 @@ class PlexService:
             # seed is loaded in full (below), not every candidate track.
             seed = self._pick_synthetic_seed_track(section, mode, sample_only=True)
         if not seed:
-            raise RuntimeError("Unable to find music to start this radio.")
+            raise RuntimeError(_("Unable to find music to start this radio."))
         seed = self._ensure_item_loaded(seed)
         server = self.ensure_server()
         queue = self._create_play_queue(
@@ -1560,14 +1640,14 @@ class PlexService:
     ) -> tuple[PlayableMedia, RadioSession]:
         items = list(queue.items)
         if not items:
-            raise RuntimeError("The radio queue returned no playable items.")
+            raise RuntimeError(_("The radio queue returned no playable items."))
         index = int(getattr(queue, "playQueueSelectedItemOffset", 0) or 0)
         if index >= len(items):
             index = 0
         first_item = self._ensure_queue_item_loaded(items[index])
         media = self.to_playable(first_item)
         if not media:
-            raise RuntimeError("Unable to resolve the first radio track.")
+            raise RuntimeError(_("Unable to resolve the first radio track."))
         session = RadioSession(
             kind=kind,
             description=description,
@@ -1645,21 +1725,22 @@ class PlexService:
                 )
                 station = MusicRadioStation(
                     identifier=identifier,
-                    title=getattr(playlist, "title", None) or f"{getattr(artist, 'title', 'Artist')} Radio",
-                    summary=getattr(playlist, "summary", "") or _RADIO_DISPLAY_NAMES.get("artist_radio", ""),
+                    title=getattr(playlist, "title", None)
+                    or _("{title} Radio", title=getattr(artist, "title", None) or _("Artist")),
+                    summary=getattr(playlist, "summary", "") or _radio_display_name("artist_radio"),
                     key=getattr(playlist, "key", ""),
                     station_type="artist_radio",
-                    category=_RADIO_DISPLAY_NAMES.get("artist_radio", "Artist Radio"),
+                    category=_radio_display_name("artist_radio"),
                     library_section_id=library_section_id,
-                    hub_title=_RADIO_DISPLAY_NAMES.get("artist_radio", "Artist Radio"),
+                    hub_title=_radio_display_name("artist_radio"),
                     hub_context="artist",
                     item=playlist,
                 )
                 return self._start_station_radio(station)
-        description = _RADIO_DISPLAY_NAMES.get("artist_radio", "Artist Radio")
+        description = _radio_display_name("artist_radio")
         title = getattr(artist, "title", None)
         if title:
-            description = f"{title} Radio"
+            description = _("{title} Radio", title=title)
         return self._start_continuous_radio(
             artist,
             kind="artist_radio",
@@ -1669,10 +1750,10 @@ class PlexService:
 
     def _start_album_radio(self, album: PlexObject) -> tuple[PlayableMedia, RadioSession]:
         library_section_id = self._normalize_section_id(getattr(album, "librarySectionID", None))
-        description = _RADIO_DISPLAY_NAMES.get("album_radio", "Album Radio")
+        description = _radio_display_name("album_radio")
         album_title = getattr(album, "title", None)
         if album_title:
-            description = f"{album_title} Mix"
+            description = _("{title} Mix", title=album_title)
         return self._start_continuous_radio(
             album,
             kind="album_radio",
@@ -1682,10 +1763,10 @@ class PlexService:
 
     def _start_track_radio(self, track: PlexObject) -> tuple[PlayableMedia, RadioSession]:
         library_section_id = self._normalize_section_id(getattr(track, "librarySectionID", None))
-        description = _RADIO_DISPLAY_NAMES.get("track_radio", "Track Radio")
+        description = _radio_display_name("track_radio")
         track_title = getattr(track, "title", None)
         if track_title:
-            description = f"{track_title} Radio"
+            description = _("{title} Radio", title=track_title)
         return self._start_continuous_radio(
             track,
             kind="track_radio",
@@ -1704,13 +1785,13 @@ class PlexService:
             if station.identifier in seen_ids:
                 continue
             seen_ids.add(station.identifier)
-            description = station.summary or _RADIO_DISPLAY_NAMES.get(station.station_type, station.category)
+            description = station.summary or _radio_display_name(station.station_type, station.category)
             station_options.append(
                 RadioOption(
                     id=f"station:{station.identifier}",
                     label=station.title,
                     description=description,
-                    category=station.category or "Stations",
+                    category=station.category or _("Stations"),
                     action="station",
                     data={"station": station},
                 )
@@ -1724,40 +1805,40 @@ class PlexService:
             obj_type = getattr(plex_object, "type", "") or ""
             title = getattr(plex_object, "title", None)
             if obj_type == "artist":
-                label = f"Artist Radio{f' - {title}' if title else ''}"
-                description = "Start a station based on this artist."
+                label = _("Artist Radio - {title}", title=title) if title else _("Artist Radio")
+                description = _("Start a station based on this artist.")
                 special_options.append(
                     RadioOption(
                         id=f"artist-radio:{getattr(plex_object, 'ratingKey', '')}",
                         label=label,
                         description=description,
-                        category="Selection",
+                        category=_("Selection"),
                         action="artist_radio",
                         data={"artist": plex_object},
                     )
                 )
             elif obj_type == "album":
-                label = f"Album Radio{f' - {title}' if title else ''}"
-                description = "Play a mix inspired by this album."
+                label = _("Album Radio - {title}", title=title) if title else _("Album Radio")
+                description = _("Play a mix inspired by this album.")
                 special_options.append(
                     RadioOption(
                         id=f"album-radio:{getattr(plex_object, 'ratingKey', '')}",
                         label=label,
                         description=description,
-                        category="Selection",
+                        category=_("Selection"),
                         action="album_radio",
                         data={"album": plex_object},
                     )
                 )
             elif obj_type == "track":
-                label = f"Track Radio{f' - {title}' if title else ''}"
-                description = "Create a station seeded by this track."
+                label = _("Track Radio - {title}", title=title) if title else _("Track Radio")
+                description = _("Create a station seeded by this track.")
                 special_options.append(
                     RadioOption(
                         id=f"track-radio:{getattr(plex_object, 'ratingKey', '')}",
                         label=label,
                         description=description,
-                        category="Selection",
+                        category=_("Selection"),
                     action="track_radio",
                     data={"track": plex_object},
                 )
@@ -1790,7 +1871,7 @@ class PlexService:
         queue = self._create_play_queue(server, playlist, shuffle=0, continuous=0)
         queue.refresh()
         section_id = self._normalize_section_id(getattr(playlist, "librarySectionID", None))
-        description = getattr(playlist, "title", None) or "Playlist"
+        description = getattr(playlist, "title", None) or _("Playlist")
         return self._initialize_radio_session(
             queue,
             kind="playlist",
@@ -1953,7 +2034,7 @@ class PlexService:
         parts = [getattr(node, "title", "")]
         media_type = getattr(node, "type", "")
         if media_type:
-            parts.append(f"Type: {media_type}")
+            parts.append(_("Type: {type}", type=media_type))
         summary = getattr(node, "summary", "")
         if summary:
             parts.append("")
@@ -2256,7 +2337,7 @@ class PlexService:
         try:
             deck = list(server.library.onDeck())
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Unable to load Plex queues: {exc}") from exc
+            raise RuntimeError(_("Unable to load Plex queues: {error}", error=exc)) from exc
         continue_items: List[PlayableMedia] = []
         up_next_items: List[PlayableMedia] = []
         seen_continue: Set[str] = set()
@@ -2417,14 +2498,14 @@ class PlexService:
         errors: List[str] = []
         servers = self.refresh_servers()
         if not servers:
-            self._last_search_errors = ["No Plex servers are available for this account."]
+            self._last_search_errors = [_("No Plex servers are available for this account.")]
             return hits
         original_server = None
         original_resource_id = self._current_resource_id
         try:
             original_server = self.ensure_server()
         except Exception as exc:
-            self._last_search_errors = [f"Unable to connect to the current Plex server: {exc}"]
+            self._last_search_errors = [_("Unable to connect to the current Plex server: {error}", error=exc)]
             return hits
         current_id = self._current_resource_id
         primary_resource: Optional[MyPlexResource] = None
@@ -2444,19 +2525,19 @@ class PlexService:
             name = resource.name or resource.clientIdentifier
             try:
                 if existing_server is None:
-                    msg = f"Connecting to {name}..."
+                    msg = _("Connecting to {name}...", name=name)
                     print(f"[Search] {msg}")
                     if on_status:
                         on_status(msg)
                     server = self._connect_with_strategy(resource, reason=f"search:{name}")
                 else:
                     server = existing_server
-                    msg = f"{name}: searching current server..."
+                    msg = _("{name}: searching current server...", name=name)
                     print(f"[Search] {msg}")
                     if on_status:
                         on_status(msg)
             except Exception as exc:
-                msg = f"{name}: connect failed ({exc})"
+                msg = _("{name}: connect failed ({error})", name=name, error=exc)
                 print(f"[Search] {msg}")
                 local_errors.append(msg)
                 if on_status:
@@ -2472,12 +2553,18 @@ class PlexService:
                     )
                     or []
                 )
-                msg = f"{name}: {len(results)} result(s) for '{query}'"
+                msg = ngettext(
+                    "{name}: {count} result for '{query}'",
+                    "{name}: {count} results for '{query}'",
+                    len(results),
+                    name=name,
+                    query=query,
+                )
                 print(f"[Search] {msg}")
                 if on_status:
                     on_status(msg)
             except Exception as exc:
-                msg = f"{name}: search failed ({exc})"
+                msg = _("{name}: search failed ({error})", name=name, error=exc)
                 print(f"[Search] {msg}")
                 local_errors.append(msg)
                 if on_status:
@@ -2505,7 +2592,7 @@ class PlexService:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 pending = set()
                 resources_iter = iter(remaining_resources)
-                for _ in range(max_workers):
+                for _slot in range(max_workers):
                     try:
                         resource = next(resources_iter)
                     except StopIteration:
@@ -3222,7 +3309,7 @@ class PlexService:
             if matches:
                 item.fixMatch(matches[0])
             else:
-                raise RuntimeError(f"No matches found for '{title}'")
+                raise RuntimeError(_("No matches found for '{title}'", title=title))
         else:
             raise NotImplementedError(f"Item type {type(item)} does not support matching")
 

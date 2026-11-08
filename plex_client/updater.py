@@ -21,6 +21,7 @@ import requests
 import wx
 
 from .config import ConfigStore
+from .i18n import _
 from .version import APP_NAME, APP_USER_AGENT, APP_VERSION
 
 
@@ -53,7 +54,7 @@ class UpdateInfo:
 def _parse_version(version: str) -> Tuple[int, int, int]:
     match = _VERSION_RE.match(version.strip())
     if not match:
-        raise ValueError(f"Unsupported version format: {version}")
+        raise ValueError(_("Unsupported version format: {version}", version=version))
     major = int(match.group(1))
     minor = int(match.group(2))
     patch = int(match.group(3) or 0)
@@ -80,7 +81,7 @@ def _safe_extract(archive: zipfile.ZipFile, target_dir: Path) -> None:
     for member in archive.infolist():
         member_path = (target_dir / member.filename).resolve()
         if member_path != target_dir and target_dir not in member_path.parents:
-            raise UpdateError("Update archive contains an unsafe path.")
+            raise UpdateError(_("Update archive contains an unsafe path."))
     archive.extractall(target_dir)
 
 
@@ -91,7 +92,7 @@ def _find_app_dir(staging_dir: Path) -> Path:
     for candidate in subdirs:
         if (candidate / APP_EXE_NAME).exists():
             return candidate
-    raise UpdateError(f"Updated {APP_EXE_NAME} not found in extracted files.")
+    raise UpdateError(_("Updated {exe_name} not found in extracted files.", exe_name=APP_EXE_NAME))
 
 
 def _sha256_file(path: Path) -> str:
@@ -175,12 +176,22 @@ def _verify_authenticode(exe_path: Path, allowed_thumbprints: Iterable[str]) -> 
         check=False,
     )
     if result.returncode != 0:
-        raise UpdateError(f"Authenticode verification failed: {result.stderr.strip() or result.stdout.strip()}")
+        raise UpdateError(
+            _(
+                "Authenticode verification failed: {details}",
+                details=result.stderr.strip() or result.stdout.strip(),
+            )
+        )
     payload = (result.stdout or "").strip()
     try:
         data = json.loads(payload) if payload else {}
     except json.JSONDecodeError:
-        raise UpdateError(f"Authenticode verification failed: {payload or 'Invalid signature output.'}")
+        raise UpdateError(
+            _(
+                "Authenticode verification failed: {details}",
+                details=payload or _("Invalid signature output."),
+            )
+        )
     status = str(data.get("Status") or "").strip()
     status_message = str(data.get("StatusMessage") or "").strip()
     thumbprint = _normalize_thumbprint(data.get("Thumbprint"))
@@ -192,12 +203,12 @@ def _verify_authenticode(exe_path: Path, allowed_thumbprints: Iterable[str]) -> 
                 if _win_verify_trust(exe_path) == 0x800B0109:  # CERT_E_UNTRUSTEDROOT
                     return
             except (OSError, AttributeError) as exc:
-                raise UpdateError(f"Unable to verify the update signature: {exc}") from exc
-    message = f"Authenticode status was {status or 'Unknown'}."
+                raise UpdateError(_("Unable to verify the update signature: {error}", error=exc)) from exc
+    message = _("Authenticode status was {status}.", status=status or _("Unknown"))
     if status_message:
         message = f"{message} {status_message}"
     if thumbprint:
-        message = f"{message} (thumbprint {thumbprint})"
+        message = _("{message} (thumbprint {thumbprint})", message=message, thumbprint=thumbprint)
     raise UpdateError(message)
 
 
@@ -232,7 +243,7 @@ class UpdateManager:
     def check_for_updates(self, interactive: bool = True) -> None:
         if self._check_thread and self._check_thread.is_alive():
             if interactive:
-                self._show_message("An update check is already running.")
+                self._show_message(_("An update check is already running."))
             return
 
         def worker() -> None:
@@ -246,12 +257,12 @@ class UpdateManager:
         self._check_thread = threading.Thread(target=worker, name="PlexibleUpdateCheck", daemon=True)
         self._check_thread.start()
         if interactive:
-            self._set_status("Checking for updates...")
+            self._set_status(_("Checking for updates..."))
 
     def _handle_check_error(self, exc: Exception, interactive: bool) -> None:
         self._set_status("")
         if interactive:
-            self._show_message(f"Unable to check for updates:\n{exc}", icon=wx.ICON_ERROR)
+            self._show_message(_("Unable to check for updates:\n{error}", error=exc), icon=wx.ICON_ERROR)
 
     def _handle_check_result(self, info: UpdateInfo, interactive: bool) -> None:
         self._set_status("")
@@ -260,28 +271,32 @@ class UpdateManager:
             self._prompt_for_update(info)
             return
         if interactive:
-            self._show_message(f"Plexible is up to date (v{current_version}).")
+            self._show_message(_("Plexible is up to date (v{version}).", version=current_version))
 
     def _prompt_for_update(self, info: UpdateInfo) -> None:
         current_version = _normalize_version(APP_VERSION)
         notes = (info.notes or "").strip()
         if notes and len(notes) > 500:
             notes = notes[:497] + "..."
-        detail = f"Update available: v{info.version} (current v{current_version})."
+        detail = _(
+            "Update available: v{version} (current v{current_version}).",
+            version=info.version,
+            current_version=current_version,
+        )
         if notes:
-            detail = f"{detail}\n\nRelease notes:\n{notes}"
+            detail = detail + "\n\n" + _("Release notes:\n{notes}", notes=notes)
         if not self._is_frozen() or sys.platform != "win32":
-            detail = (
-                f"{detail}\n\nAutomatic updates are available only in the packaged Windows app."
-                f"\nDownload the package for your operating system: "
-                f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+            detail = detail + "\n\n" + _(
+                "Automatic updates are available only in the packaged Windows app."
+                "\nDownload the package for your operating system: {url}",
+                url=f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest",
             )
             self._show_message(detail)
             return
-        detail = f"{detail}\n\nDownload and install now? Plexible will restart."
+        detail = detail + "\n\n" + _("Download and install now? Plexible will restart.")
         result = wx.MessageBox(
             detail,
-            "Plexible Update Available",
+            _("Plexible Update Available"),
             wx.YES_NO | wx.ICON_INFORMATION,
             parent=self._parent,
         )
@@ -290,10 +305,10 @@ class UpdateManager:
 
     def _start_update(self, info: UpdateInfo) -> None:
         if self._update_thread and self._update_thread.is_alive():
-            self._show_message("An update is already in progress.")
+            self._show_message(_("An update is already in progress."))
             return
 
-        self._busy_info = wx.BusyInfo("Downloading update...", parent=self._parent)
+        self._busy_info = wx.BusyInfo(_("Downloading update..."), parent=self._parent)
 
         def worker() -> None:
             try:
@@ -308,7 +323,7 @@ class UpdateManager:
 
     def _handle_update_error(self, exc: Exception) -> None:
         self._clear_busy()
-        self._show_message(f"Update failed:\n{exc}", icon=wx.ICON_ERROR)
+        self._show_message(_("Update failed:\n{error}", error=exc), icon=wx.ICON_ERROR)
 
     def _finalize_update(self, staging_dir: Path, backup_dir: Path) -> None:
         self._clear_busy()
@@ -328,14 +343,14 @@ class UpdateManager:
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.Popen(args, creationflags=creation_flags)
         except Exception as exc:  # noqa: BLE001
-            self._show_message(f"Failed to launch updater:\n{exc}")
+            self._show_message(_("Failed to launch updater:\n{error}", error=exc))
             return
-        self._show_message("Update prepared. Plexible will close and restart.")
+        self._show_message(_("Update prepared. Plexible will close and restart."))
         self._parent.Close(True)
 
     def _download_and_stage(self, info: UpdateInfo) -> tuple[Path, Path]:
         if not self._is_frozen() or sys.platform != "win32":
-            raise UpdateError("Updates can only be installed from the packaged Windows app.")
+            raise UpdateError(_("Updates can only be installed from the packaged Windows app."))
 
         update_root = _get_update_root()
         download_dir = update_root / "downloads"
@@ -348,7 +363,7 @@ class UpdateManager:
         backup_root.mkdir(parents=True, exist_ok=True)
 
         archive_path = download_dir / info.asset_name
-        self._set_status("Downloading update package...")
+        self._set_status(_("Downloading update package..."))
         with requests.get(info.download_url, stream=True, timeout=60, headers={"User-Agent": APP_USER_AGENT}) as resp:
             resp.raise_for_status()
             with archive_path.open("wb") as handle:
@@ -356,18 +371,18 @@ class UpdateManager:
                     if chunk:
                         handle.write(chunk)
 
-        self._set_status("Verifying update package...")
+        self._set_status(_("Verifying update package..."))
         actual_hash = _sha256_file(archive_path)
         if actual_hash.lower() != info.sha256.lower():
-            raise UpdateError("Downloaded update failed SHA-256 verification.")
+            raise UpdateError(_("Downloaded update failed SHA-256 verification."))
 
-        self._set_status("Extracting update package...")
+        self._set_status(_("Extracting update package..."))
         with zipfile.ZipFile(archive_path) as archive:
             _safe_extract(archive, staging_root)
 
         app_dir = _find_app_dir(staging_root)
         exe_path = app_dir / APP_EXE_NAME
-        self._set_status("Verifying update signature...")
+        self._set_status(_("Verifying update signature..."))
         _verify_authenticode(exe_path, info.signing_thumbprints)
 
         return app_dir, backup_root
@@ -378,16 +393,15 @@ class UpdateManager:
         response = requests.get(api_url, headers=headers, timeout=15)
         if response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0":
             reset = response.headers.get("X-RateLimit-Reset")
-            when = ""
             if reset and reset.isdigit():
                 when = datetime.fromtimestamp(int(reset)).strftime("%Y-%m-%d %H:%M")
-                when = f" (resets {when})"
-            raise UpdateError(f"GitHub API rate limit exceeded{when}.")
+                raise UpdateError(_("GitHub API rate limit exceeded (resets {time}).", time=when))
+            raise UpdateError(_("GitHub API rate limit exceeded."))
         response.raise_for_status()
         release = response.json()
         tag_name = str(release.get("tag_name") or "").strip()
         if not tag_name:
-            raise UpdateError("Latest release does not include a tag name.")
+            raise UpdateError(_("Latest release does not include a tag name."))
         assets = release.get("assets") or []
         manifest_asset = None
         for asset in assets:
@@ -395,10 +409,10 @@ class UpdateManager:
                 manifest_asset = asset
                 break
         if not manifest_asset:
-            raise UpdateError(f"{UPDATE_MANIFEST_NAME} not found in the latest release assets.")
+            raise UpdateError(_("{manifest_name} not found in the latest release assets.", manifest_name=UPDATE_MANIFEST_NAME))
         manifest_url = manifest_asset.get("browser_download_url")
         if not manifest_url:
-            raise UpdateError("Update manifest download URL missing from release assets.")
+            raise UpdateError(_("Update manifest download URL missing from release assets."))
         manifest_resp = requests.get(manifest_url, headers=headers, timeout=15)
         manifest_resp.raise_for_status()
         manifest = manifest_resp.json()
@@ -415,7 +429,7 @@ class UpdateManager:
 
         tag_version = _normalize_version(tag_name)
         if version and _normalize_version(version) != tag_version:
-            raise UpdateError("Update manifest version does not match the release tag.")
+            raise UpdateError(_("Update manifest version does not match the release tag."))
         version = version or tag_version
 
         if not download_url and asset_name:
@@ -425,7 +439,7 @@ class UpdateManager:
                     break
 
         if not asset_name or not download_url or not sha256:
-            raise UpdateError("Update manifest is missing required fields.")
+            raise UpdateError(_("Update manifest is missing required fields."))
 
         return UpdateInfo(
             version=_normalize_version(version),

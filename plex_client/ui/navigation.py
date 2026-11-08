@@ -9,6 +9,7 @@ import wx
 from plexapi.base import PlexObject
 from plexapi.library import Folder, LibrarySection
 
+from ..i18n import _
 from ..plex_service import MusicAlphaBucket, MusicCategory, MusicRadioOption
 from .content_panel import name_control
 
@@ -39,7 +40,7 @@ class NavigationTree(wx.TreeCtrl):
         super().__init__(parent, style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT, *args, **kwargs)
         # A native SysTreeView32 ignores SetName for MSAA purposes, so NVDA
         # announced a bare "tree view". Keep the accessible referenced.
-        self._accessible = name_control(self, "Library Navigation", "tree")
+        self._accessible = name_control(self, _("Library Navigation"), "tree")
         self._loader = loader
         self._music_label_style: str = "none"
         self._on_selection = on_selection
@@ -278,10 +279,10 @@ class NavigationTree(wx.TreeCtrl):
             return self._queue_root
         payload = NodePayload(kind="queue_root", plex_object=None, identifier="queue-root")
         try:
-            self._queue_root = self.PrependItem(self._root, "Now Playing", data=payload)
+            self._queue_root = self.PrependItem(self._root, _("Now Playing"), data=payload)
         except RuntimeError:
             try:
-                self._queue_root = self.AppendItem(self._root, "Now Playing", data=payload)
+                self._queue_root = self.AppendItem(self._root, _("Now Playing"), data=payload)
             except RuntimeError:
                 self._queue_root = None
         if self._queue_root and self._queue_root.IsOk():
@@ -296,7 +297,7 @@ class NavigationTree(wx.TreeCtrl):
         return self._queue_root
 
     def _format_queue_label(self, plex_object: PlexObject, index: int) -> str:
-        title = getattr(plex_object, "title", None) or getattr(plex_object, "name", None) or "Untitled"
+        title = getattr(plex_object, "title", None) or getattr(plex_object, "name", None) or _("Untitled")
         return f"{index + 1:02d}. {title}"
 
     def selection_is_queue(self) -> bool:
@@ -323,7 +324,7 @@ class NavigationTree(wx.TreeCtrl):
         if self._destroyed or not item or not item.IsOk():
             return
         try:
-            error_item = self.AppendItem(item, f"Error: {exc}", data=self._wrap("error", None))
+            error_item = self.AppendItem(item, _("Error: {error}", error=exc), data=self._wrap("error", None))
         except RuntimeError:
             return
         self.SetItemTextColour(error_item, wx.RED)
@@ -347,7 +348,7 @@ class NavigationTree(wx.TreeCtrl):
         if self._destroyed or not item or not item.IsOk():
             return
         try:
-            placeholder = self.AppendItem(item, "Loading...", data=self._wrap("placeholder", None))
+            placeholder = self.AppendItem(item, _("Loading..."), data=self._wrap("placeholder", None))
         except RuntimeError:
             return
         self.SetItemTextColour(placeholder, wx.Colour(120, 120, 120))
@@ -382,7 +383,7 @@ class NavigationTree(wx.TreeCtrl):
     def _format_music_label(self, label: str, child_type: str) -> str:
         """Apply the configured music label style to a tree label."""
         emoji_map = {"artist": "🎤", "album": "💿", "track": "♪"}
-        text_map = {"artist": "Artist:", "album": "Album:", "track": "Track:"}
+        text_map = {"artist": _("Artist:"), "album": _("Album:"), "track": _("Track:")}
         if self._music_label_style == "emoji":
             prefix = emoji_map.get(child_type, "")
         elif self._music_label_style == "text":
