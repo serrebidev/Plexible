@@ -74,17 +74,48 @@ def _locate_extracted_libvlc(root: Path) -> Optional[Path]:
     return None
 
 
-def _ensure_portable_vlc(arch: str) -> Optional[Path]:
+def _version_key(name: str) -> Tuple[int, ...]:
+    match = re.search(r"vlc-(\d+(?:\.\d+)*)", name)
+    if not match:
+        return ()
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _find_portable_vlc(arch: str) -> Optional[Path]:
+    """Newest portable VLC already downloaded for ``arch``. No network access."""
+    if arch not in ("win32", "win64"):
+        return None
+    base_dir = _portable_vlc_base_dir()
+    arch_dir = base_dir / arch if base_dir else None
+    if not arch_dir or not arch_dir.is_dir():
+        return None
+    for folder in sorted(arch_dir.glob(f"vlc-*-{arch}"), key=lambda p: _version_key(p.name), reverse=True):
+        lib_dir = _locate_extracted_libvlc(folder)
+        if lib_dir and (lib_dir / "libvlc.dll").exists():
+            return lib_dir
+    return None
+
+
+def _ensure_portable_vlc(
+    arch: str,
+    progress: Optional[Callable[[int], None]] = None,
+) -> Optional[Path]:
+    """Return a portable VLC, downloading it (about 40 MB) if none is there yet.
+
+    This blocks for as long as the download takes: call it from a worker
+    thread. ``progress`` receives the percentage downloaded when the server
+    gives a size.
+    """
     if arch not in ("win32", "win64"):
         return None
     base_dir = _portable_vlc_base_dir()
     if not base_dir:
         return None
+    existing = _find_portable_vlc(arch)
+    if existing:
+        return existing
     version = _portable_vlc_version(arch)
     target_dir = base_dir / arch / f"vlc-{version}-{arch}"
-    lib_dir = _locate_extracted_libvlc(target_dir) if target_dir.exists() else None
-    if lib_dir and (lib_dir / "libvlc.dll").exists():
-        return lib_dir
     url = f"https://get.videolan.org/vlc/{version}/{arch}/vlc-{version}-{arch}.zip"
     target_dir.mkdir(parents=True, exist_ok=True)
     tmp_zip = target_dir / "vlc.zip"
@@ -92,8 +123,16 @@ def _ensure_portable_vlc(arch: str) -> Optional[Path]:
         print(f"[LibVLC] Downloading portable VLC ({arch})...")
         with requests.get(url, stream=True, timeout=30) as resp:
             resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
             with tmp_zip.open("wb") as fp:
-                shutil.copyfileobj(resp.raw, fp)
+                for chunk in resp.iter_content(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    fp.write(chunk)
+                    done += len(chunk)
+                    if progress and total:
+                        progress(min(100, done * 100 // total))
         with zipfile.ZipFile(tmp_zip) as archive:
             archive.extractall(target_dir)
         lib_dir = _locate_extracted_libvlc(target_dir)
@@ -108,6 +147,10 @@ def _ensure_portable_vlc(arch: str) -> Optional[Path]:
             except Exception:
                 pass
     return None
+
+
+def _windows_arch() -> str:
+    return "win64" if struct.calcsize("P") == 8 else "win32"
 
 
 def _ensure_dll_directory(path: Path) -> None:
@@ -148,10 +191,10 @@ def _bootstrap_libvlc_environment() -> None:
                 selected_dir = candidate
                 break
         if selected_dir is None and os.name == "nt":
-            arch = "win64" if struct.calcsize("P") == 8 else "win32"
-            portable_dir = _ensure_portable_vlc(arch)
-            if portable_dir and (portable_dir / "libvlc.dll").exists():
-                selected_dir = portable_dir
+            # Only a copy downloaded earlier: this runs while the module is
+            # imported, before any window exists, so it must not download
+            # (about 40 MB) or even ask videolan.org for the latest version.
+            selected_dir = _find_portable_vlc(_windows_arch())
         if selected_dir:
             os.environ.setdefault("PYTHON_VLC_MODULE_PATH", str(selected_dir))
             _ensure_dll_directory(selected_dir)
@@ -217,6 +260,9 @@ class PlaybackPanel(TransparentContainer):
         self._vlc_path_cache: Optional[str] = None
         self._libvlc_env_prepared = False
         self._libvlc_warning_shown = False
+        self._vlc_download_thread: Optional[threading.Thread] = None
+        self._vlc_download_media: Optional[PlayableMedia] = None
+        self._vlc_download_spoken = 0
         self._libvlc_candidates: list[str] = []
         self._libvlc_candidate_index = 0
         self._libvlc_active_source: Optional[str] = None
@@ -438,6 +484,13 @@ class PlaybackPanel(TransparentContainer):
             "[Playback] Requested stream -> "
             f"direct={self._direct_url} fallback={self._browser_url}"
         )
+
+        if self._vlc_download_needed():
+            self._current = None
+            self._direct_url = None
+            self._browser_url = None
+            self._start_vlc_download(media)
+            return "downloading"
 
         mode = self._play_with_libvlc()
         if mode == "libvlc":
@@ -1285,10 +1338,9 @@ class PlaybackPanel(TransparentContainer):
                 selected_dir = directory
                 break
         if selected_dir is None and sys.platform.startswith("win"):
-            arch = "win64" if struct.calcsize("P") == 8 else "win32"
-            portable_dir = _ensure_portable_vlc(arch)
-            if portable_dir and (portable_dir / "libvlc.dll").exists():
-                selected_dir = portable_dir
+            # Downloading runs from play() on a worker thread, never here on
+            # the GUI thread.
+            selected_dir = _find_portable_vlc(_windows_arch())
         if selected_dir:
             os.environ["PYTHON_VLC_MODULE_PATH"] = str(selected_dir)
             exe = selected_dir / "vlc.exe"
@@ -1903,6 +1955,79 @@ class PlaybackPanel(TransparentContainer):
                 _("This Python build is 64-bit. Please select the 64-bit VLC installation (Program Files\\VideoLAN\\VLC)."),
             )
         return True, None
+
+    # ------------------------------------------------------- First-run VLC download
+
+    def _vlc_download_needed(self) -> bool:
+        """True on Windows when no VLC is installed, configured or downloaded yet."""
+        if not sys.platform.startswith("win") or vlc is not None:
+            return False
+        if self._vlc_download_thread is not None and self._vlc_download_thread.is_alive():
+            return True
+        self._prepare_libvlc_environment()
+        return not os.environ.get("PYTHON_VLC_MODULE_PATH")
+
+    def _start_vlc_download(self, media: PlayableMedia) -> None:
+        # The item asked for last is the one that plays once VLC is ready.
+        self._vlc_download_media = media
+        if self._vlc_download_thread is not None and self._vlc_download_thread.is_alive():
+            self._announce_accessible(_("VLC is still downloading. Playback will start when it is ready."))
+            return
+        self._vlc_download_spoken = 0
+        self._header.SetLabel(_("Downloading VLC..."))
+        self._announce_accessible(
+            _(
+                "Downloading VLC, which Plexible needs to play media. This happens only once. "
+                "Playback will start when it is ready."
+            )
+        )
+        arch = _windows_arch()
+
+        def work() -> None:
+            try:
+                path = _ensure_portable_vlc(arch, lambda percent: wx.CallAfter(self._on_vlc_download_progress, percent))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[LibVLC] Portable VLC download failed: {exc}")
+                path = None
+            wx.CallAfter(self._on_vlc_download_done, path)
+
+        self._vlc_download_thread = threading.Thread(target=work, name="VLCDownload", daemon=True)
+        self._vlc_download_thread.start()
+
+    def _on_vlc_download_progress(self, percent: int) -> None:
+        if self._is_destroying():
+            return
+        self._header.SetLabel(_("Downloading VLC... {percent}%", percent=percent))
+        # Speak a quarter at a time, without cutting off what is being read.
+        step = percent // 25 * 25
+        if 0 < step < 100 and step > self._vlc_download_spoken:
+            self._vlc_download_spoken = step
+            screen_reader.speak(_("VLC {percent}%", percent=step), interrupt=False)
+
+    def _on_vlc_download_done(self, path: Optional[Path]) -> None:
+        self._vlc_download_thread = None
+        if self._is_destroying():
+            return
+        media = self._vlc_download_media
+        self._vlc_download_media = None
+        if path is not None and (path / "libvlc.dll").exists():
+            os.environ["PYTHON_VLC_MODULE_PATH"] = str(path)
+            _ensure_dll_directory(path)
+            self._libvlc_env_prepared = False
+            self._announce_accessible(_("VLC is ready."))
+            if media is not None and self._current is None:
+                self.play(media)
+            return
+        self._header.SetLabel(_("Nothing is playing."))
+        wx.MessageBox(
+            _(
+                "Plexible could not download VLC, which it needs to play media.\n\n"
+                "Check your internet connection and try again, or install VLC from videolan.org."
+            ),
+            "Plexible",
+            wx.ICON_WARNING | wx.OK,
+            parent=self,
+        )
 
     def _prompt_for_vlc_path(self) -> bool:
         if self._vlc_notified_missing:
