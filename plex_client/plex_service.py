@@ -158,6 +158,10 @@ _MUSIC_LETTER_TYPE_IDS: Dict[str, int] = {"artists": 8, "albums": 9, "tracks": 1
 # A letter can hold thousands of tracks. plexapi's default page of 100 turns that
 # into dozens of round trips, which takes tens of seconds on a remote server.
 _MUSIC_LETTER_PAGE_SIZE = 1000
+# Once one server address answers, better-ranked addresses get this long to
+# answer too before the working one is used.
+_CONNECT_GRACE_SECONDS = 1.0
+_CONNECT_PENDING = object()
 
 _MUSIC_CATEGORY_DEFINITIONS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -402,7 +406,7 @@ class PlexService:
         for attempt_idx in range(3):
             for label, kwargs in attempts:
                 try:
-                    server = self._call_with_supported_kwargs(resource.connect, **kwargs)
+                    server = self._connect_resource_quickly(resource, **kwargs)
                     print(f"[PlexService] Connected to {name} via {label} strategy.")
                     return server
                 except Exception as exc:
@@ -415,6 +419,78 @@ class PlexService:
         if last_exc:
             raise last_exc
         raise RuntimeError(f"Unable to connect to Plex resource '{name}'.")
+
+    def _connect_resource_quickly(
+        self,
+        resource: MyPlexResource,
+        *,
+        ssl: Optional[bool] = None,
+        timeout: int = 8,
+        locations: Optional[List[str]] = None,
+    ) -> PlexServer:
+        """Connect like MyPlexResource.connect(), without waiting on dead addresses.
+
+        plexapi tries every address at once but waits for all of them before
+        choosing. A server reached from outside its network lists a local
+        address that never answers, so startup sat on its full timeout (8 s)
+        although the remote address had answered in 0.4 s.
+        """
+        if not isinstance(resource, MyPlexResource):
+            return self._call_with_supported_kwargs(resource.connect, ssl=ssl, timeout=timeout, locations=locations)
+        urls = list(resource.preferred_connections(ssl=ssl, locations=locations))
+        if not urls:
+            raise NotFound(f"Unable to connect to resource: {resource.name}")
+        session = getattr(getattr(resource, "_server", None), "_session", None)
+        outcomes: List[object] = [_CONNECT_PENDING] * len(urls)
+        changed = threading.Condition()
+
+        def attempt(index: int, url: str) -> None:
+            try:
+                outcome: object = PlexServer(baseurl=url, token=resource.accessToken, session=session, timeout=timeout)
+            except Exception as exc:  # noqa: BLE001
+                outcome = exc
+            with changed:
+                outcomes[index] = outcome
+                changed.notify_all()
+
+        for index, url in enumerate(urls):
+            threading.Thread(target=attempt, args=(index, url), name="PlexConnect", daemon=True).start()
+
+        deadline = time.monotonic() + timeout + 5
+        first_success_at: Optional[float] = None
+        with changed:
+            while True:
+                now = time.monotonic()
+                if first_success_at is None and any(self._is_connection(o) for o in outcomes):
+                    first_success_at = now
+                grace_over = first_success_at is not None and now - first_success_at >= _CONNECT_GRACE_SECONDS
+                server = self._pick_connection(outcomes, grace_over)
+                if server is not None:
+                    return server
+                if all(o is not _CONNECT_PENDING for o in outcomes) or now >= deadline:
+                    break
+                wait_for = deadline - now
+                if first_success_at is not None:
+                    wait_for = min(wait_for, first_success_at + _CONNECT_GRACE_SECONDS - now)
+                changed.wait(timeout=max(0.01, wait_for))
+        failures = [o for o in outcomes if isinstance(o, BaseException)]
+        raise NotFound(f"Unable to connect to resource: {resource.name}") from (failures[-1] if failures else None)
+
+    @staticmethod
+    def _is_connection(outcome: object) -> bool:
+        return outcome is not _CONNECT_PENDING and not isinstance(outcome, BaseException)
+
+    @classmethod
+    def _pick_connection(cls, outcomes: Sequence[object], grace_over: bool) -> Optional[PlexServer]:
+        """Best-ranked address that answered, or None while a better one may still answer."""
+        for outcome in outcomes:
+            if outcome is _CONNECT_PENDING:
+                if grace_over:
+                    continue
+                return None
+            if cls._is_connection(outcome):
+                return cast(PlexServer, outcome)
+        return None
 
     def ensure_server(self) -> PlexServer:
         if self._server:
