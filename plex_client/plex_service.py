@@ -827,10 +827,14 @@ class PlexService:
                 except Exception as exc:  # noqa: BLE001
                     print(f"[Playlist] Unable to load playlist items via fetchItems: {exc}")
                     items = []
-        hydrated = [self._ensure_item_loaded(item) for item in items]
-        if hydrated:
-            self._playlist_items_cache[cache_key] = hydrated
-        return hydrated
+        # The listing already has what the tree shows (title, type, ratingKey) and
+        # the stream parts; to_playable() reloads the one item being played if
+        # anything is missing. Reloading every entry here took about 20 minutes
+        # on a 58,000-track smart playlist.
+        items = [item for item in items if item is not None]
+        if items:
+            self._playlist_items_cache[cache_key] = items
+        return items
 
     def _collection_items(self, collection: PlexObject) -> List[PlexObject]:
         if collection is None:
