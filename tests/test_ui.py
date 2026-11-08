@@ -128,3 +128,30 @@ class TestPlayback:
         monkeypatch.setattr(playback.wx, "CallAfter", lambda *args: None)
         playback.PlaybackPanel._poll_timeline(panel)
         assert reports == [("stopped", expected_position, 60000)]
+
+
+@pytest.mark.skipif(not wx_available, reason="wxPython not available")
+class TestStartOffset:
+    """A replayed track starts over; videos resume."""
+
+    @staticmethod
+    def _media(kind, offset):
+        from plex_client.plex_service import PlayableMedia
+
+        return PlayableMedia(title="Item", media_type=kind, key="/library/metadata/1", stream_url="u",
+                             browser_url=None, resume_offset=offset, item=MagicMock())
+
+    def test_reused_track_starts_from_the_beginning(self):
+        from plex_client.ui.playback import PlaybackPanel
+
+        media = self._media("track", 5045)  # position written by the previous play's timeline
+        assert PlaybackPanel._start_offset(media) == 0
+        assert media.resume_offset == 0
+
+    @pytest.mark.parametrize("kind", ["movie", "episode"])
+    def test_video_resumes(self, kind):
+        from plex_client.ui.playback import PlaybackPanel
+
+        media = self._media(kind, 5045)
+        assert PlaybackPanel._start_offset(media) == 5045
+        assert media.resume_offset == 5045

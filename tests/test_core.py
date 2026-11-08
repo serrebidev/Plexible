@@ -382,3 +382,32 @@ def test_opening_a_letter_does_not_reload_each_item(plex_service, monkeypatch):
     )
     assert plex_service._music_alpha_bucket_items(bucket) == artists
     section.fetchItems.assert_called_once_with(bucket.key, container_size=1000)
+
+
+def _media_node(kind, view_offset):
+    node = MagicMock()
+    node.type = kind
+    node.title = "Item"
+    node.key = "/library/metadata/1"
+    node.viewOffset = view_offset
+    node.media = None
+    node.getStreamURL.return_value = "http://server:32400/stream?a=1"
+    return node
+
+
+def test_playing_a_track_again_starts_from_the_beginning(plex_service):
+    """Stop records the position; replaying a track must not resume it like a pause."""
+    node = _media_node("track", 15220)
+    with patch.object(plex_service, "ensure_server", return_value=MagicMock(_token="t")):
+        playable = plex_service.to_playable(node)
+    assert playable.resume_offset == 0
+    node.getStreamURL.assert_called_once_with(offset=0)
+
+
+@pytest.mark.parametrize("kind", ["movie", "episode"])
+def test_videos_still_resume_where_they_were_left(plex_service, kind):
+    node = _media_node(kind, 15220)
+    with patch.object(plex_service, "ensure_server", return_value=MagicMock(_token="t")):
+        playable = plex_service.to_playable(node)
+    assert playable.resume_offset == 15220
+    node.getStreamURL.assert_called_once_with(offset=15220)
