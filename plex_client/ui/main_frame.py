@@ -1856,6 +1856,10 @@ class MainFrame(wx.Frame):
                     print(f"[Progress] Unable to pre-flush {rating_key}: {exc}")
         self._schedule_progress_flush(5000)
         mode = self._playback_panel.play(media)
+        if mode == "downloading":
+            # Nothing is streaming yet: the playback panel announces the VLC
+            # download and starts this item itself once VLC is ready.
+            return
         if mode == "libvlc":
             player_desc = _("built-in LibVLC")
         elif mode == "vlc":
