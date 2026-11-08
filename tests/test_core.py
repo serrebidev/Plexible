@@ -504,3 +504,41 @@ def test_browse_all_lists_every_item_it_announces(plex_service):
     assert kwargs["libtype"] == "track"
     assert "maxresults" not in kwargs
     section.searchTracks.assert_not_called()
+def test_connection_choice_prefers_better_addresses_until_grace_ends():
+    from plex_client.plex_service import _CONNECT_PENDING, PlexService
+
+    local, remote = object(), object()
+    failed = ConnectionError("unreachable")
+    pick = PlexService._pick_connection
+    assert pick([_CONNECT_PENDING, remote], grace_over=False) is None, "the local address may still answer"
+    assert pick([_CONNECT_PENDING, remote], grace_over=True) is remote
+    assert pick([failed, remote], grace_over=False) is remote
+    assert pick([local, remote], grace_over=False) is local
+    assert pick([failed, failed], grace_over=True) is None
+
+
+def test_connect_does_not_wait_for_an_address_that_never_answers(plex_service, monkeypatch):
+    """Reached from outside its network, a server's local address only times out."""
+    import time as real_time
+    from plexapi.myplex import MyPlexResource
+    from plex_client import plex_service as service_module
+
+    def fake_server(baseurl, token, session, timeout):
+        if baseurl == "https://local":
+            real_time.sleep(3)
+            raise ConnectionError("timed out")
+        return f"server at {baseurl}"
+
+    monkeypatch.setattr(service_module, "PlexServer", fake_server)
+    resource = MyPlexResource.__new__(MyPlexResource)
+    resource.__dict__.update(
+        name="Server",
+        accessToken="token",
+        preferred_connections=lambda **kwargs: ["https://local", "https://remote", "https://relay"],
+    )
+
+    start = real_time.monotonic()
+    server = plex_service._connect_resource_quickly(resource, timeout=8)
+    elapsed = real_time.monotonic() - start
+    assert server == "server at https://remote"
+    assert elapsed < 2.5, f"waited {elapsed:.1f} s for the dead address"
