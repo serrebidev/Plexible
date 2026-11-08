@@ -411,3 +411,24 @@ def test_videos_still_resume_where_they_were_left(plex_service, kind):
         playable = plex_service.to_playable(node)
     assert playable.resume_offset == 15220
     node.getStreamURL.assert_called_once_with(offset=15220)
+
+
+def test_opening_a_playlist_does_not_reload_each_track(plex_service, monkeypatch):
+    """A 58,000-track smart playlist took about 20 minutes when every entry was reloaded."""
+    tracks = []
+    for index in range(300):
+        track = MagicMock()
+        track.type = "track"
+        track.ratingKey = str(index)
+        tracks.append(track)
+    playlist = MagicMock()
+    playlist.ratingKey = "77"
+    playlist.items = MagicMock(return_value=tracks)
+    reloaded = []
+    monkeypatch.setattr(plex_service, "_ensure_item_loaded", lambda item: reloaded.append(item) or item)
+
+    assert plex_service._playlist_items(playlist) == tracks
+    assert reloaded == []
+    assert playlist.items.call_count == 1
+    assert plex_service._playlist_items(playlist) == tracks, "second open comes from the cache"
+    assert playlist.items.call_count == 1
