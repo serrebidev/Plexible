@@ -37,4 +37,6 @@ jobs:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           cp "dist/Plexible-macos.zip" "Plexible-$TAG-macos.zip"
-          python3 tools/forgejo_release.py upload "$TAG" "Plexible-$TAG-macos.zip"
+          # The release tag can predate the helper: run it from this workflow's commit.
+          curl -fsSL "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/commit/$GITHUB_SHA/tools/forgejo_release.py" -o "$RUNNER_TEMP/forgejo_release.py"
+          python3 "$RUNNER_TEMP/forgejo_release.py" upload "$TAG" "Plexible-$TAG-macos.zip"
