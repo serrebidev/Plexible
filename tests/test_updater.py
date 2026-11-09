@@ -82,12 +82,13 @@ def test_unix_packaged_app_offers_manual_download(platform, monkeypatch):
     monkeypatch.setattr(updater.wx, "MessageBox", prompt)
     manager._prompt_for_update(updater.UpdateInfo("2.0.0", "windows.zip", "https://example.com/windows.zip", "a" * 64, ""))
     assert len(messages) == 1
-    assert "https://github.com/serrebidev/Plexible/releases/latest" in messages[0]
+    assert "https://git.serrebiradio.com/serrebi/Plexible/releases/latest" in messages[0]
     prompt.assert_not_called()
 
 
-def test_updater_targets_serrebidev_repo():
+def test_updater_targets_forgejo_repo():
     from plex_client import updater
 
-    assert updater.GITHUB_OWNER == "serrebidev"
-    assert updater.GITHUB_REPO == "Plexible"
+    assert updater.FORGEJO_HOST == "git.serrebiradio.com"
+    assert updater.FORGEJO_OWNER == "serrebi"
+    assert updater.FORGEJO_REPO == "Plexible"

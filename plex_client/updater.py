@@ -25,8 +25,9 @@ from .i18n import _
 from .version import APP_NAME, APP_USER_AGENT, APP_VERSION
 
 
-GITHUB_OWNER = "serrebidev"
-GITHUB_REPO = "Plexible"
+FORGEJO_HOST = "git.serrebiradio.com"
+FORGEJO_OWNER = "serrebi"
+FORGEJO_REPO = "Plexible"
 APP_EXE_NAME = "Plexible.exe"
 UPDATE_MANIFEST_NAME = "Plexible-update.json"
 TRUSTED_SIGNING_THUMBPRINTS = {
@@ -289,7 +290,7 @@ class UpdateManager:
             detail = detail + "\n\n" + _(
                 "Automatic updates are available only in the packaged Windows app."
                 "\nDownload the package for your operating system: {url}",
-                url=f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest",
+                url=f"https://{FORGEJO_HOST}/{FORGEJO_OWNER}/{FORGEJO_REPO}/releases/latest",
             )
             self._show_message(detail)
             return
@@ -388,15 +389,15 @@ class UpdateManager:
         return app_dir, backup_root
 
     def _fetch_latest_update(self) -> UpdateInfo:
-        api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-        headers = {"Accept": "application/vnd.github+json", "User-Agent": APP_USER_AGENT}
+        api_url = f"https://{FORGEJO_HOST}/api/v1/repos/{FORGEJO_OWNER}/{FORGEJO_REPO}/releases/latest"
+        headers = {"Accept": "application/json", "User-Agent": APP_USER_AGENT}
         response = requests.get(api_url, headers=headers, timeout=15)
         if response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0":
             reset = response.headers.get("X-RateLimit-Reset")
             if reset and reset.isdigit():
                 when = datetime.fromtimestamp(int(reset)).strftime("%Y-%m-%d %H:%M")
-                raise UpdateError(_("GitHub API rate limit exceeded (resets {time}).", time=when))
-            raise UpdateError(_("GitHub API rate limit exceeded."))
+                raise UpdateError(_("Forgejo API rate limit exceeded (resets {time}).", time=when))
+            raise UpdateError(_("Forgejo API rate limit exceeded."))
         response.raise_for_status()
         release = response.json()
         tag_name = str(release.get("tag_name") or "").strip()
