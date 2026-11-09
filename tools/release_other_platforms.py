@@ -1,9 +1,10 @@
 """Linux and macOS half of a release from the Windows release host.
 
 Run once the Windows release is published: dispatches macos-release.yml on the
-tag, builds Linux over SSH with tools/build_linux_remote.sh, uploads it, and
-waits for the macOS asset. cloud-release.yml (Muse and cloud agents) has its
-own jobs for both, so this does nothing on GitHub Actions.
+tag, builds Linux over SSH with tools/build_linux_remote.sh, uploads it to the
+Forgejo release (needs FORGEJO_TOKEN), and waits for the macOS asset.
+cloud-release.yml (Muse and cloud agents) has its own jobs for both, so this
+does nothing on GitHub Actions.
 
     python tools/release_other_platforms.py vX.Y.Z
 """
@@ -38,7 +39,8 @@ def main(tag):
     run("scp", "-o", "BatchMode=yes", f"{HOST}:{remote}", local)
     if remote.startswith("/tmp/"):
         run("ssh", "-o", "BatchMode=yes", HOST, "rm -rf -- " + posixpath.dirname(remote))
-    run("gh", "release", "upload", tag, local, "--clobber")
+    run(sys.executable, os.path.join(ROOT, "tools", "forgejo_release.py"),
+        "upload", tag, local)
 
     run_id = ""
     for _ in range(12):

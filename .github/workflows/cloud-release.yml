@@ -27,7 +27,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GH_TOKEN: ${{ github.token }}
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
@@ -88,9 +87,15 @@ jobs:
           call build_exe.bat dry-run || exit /b 1
           call build_exe.bat build
 
+      - name: Add Forgejo remote
+        if: ${{ !inputs.dry_run }}
+        run: git remote add forgejo "https://x-access-token:${{ secrets.FORGEJO_TOKEN }}@git.serrebiradio.com/serrebi/Plexible.git"
+
       - name: Release
         if: ${{ !inputs.dry_run }}
         shell: cmd
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: call build_exe.bat release
 
       # The updater pins this certificate; never ship anything else.
@@ -175,9 +180,11 @@ jobs:
 
       - name: Attach to release
         if: ${{ !inputs.dry_run }}
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           tag="${{ needs.windows.outputs.tag }}"
           ext="${{ matrix.asset }}"; ext="${ext#Plexible-}"
           name="Plexible-${tag}-$ext"
           cp "dist/${{ matrix.asset }}" "$name"
-          gh release upload "$tag" "$name" --clobber --repo "$GITHUB_REPOSITORY"
+          python3 tools/forgejo_release.py upload "$tag" "$name"

@@ -1,9 +1,9 @@
 {
-  "version": "1.40.2",
-  "asset": "Plexible-v1.40.2.zip",
-  "download_url": "https://github.com/serrebidev/Plexible/releases/download/v1.40.2/Plexible-v1.40.2.zip",
-  "sha256": "2ccb5bc5638a69b4e2cca1758e81c2c79b74bc68f36fc07916dd6c23f2821122",
-  "published_at": "2026-08-08T16:02:57.310467+00:00",
-  "notes": "## Fixes\n- Fix keyboard tab order and a batch of correctness bugs",
+  "version": "1.41.2",
+  "asset": "Plexible-v1.41.2.zip",
+  "download_url": "https://git.serrebiradio.com/serrebi/Plexible/releases/download/v1.41.2/Plexible-v1.41.2.zip",
+  "sha256": "88e9ca549a8c98869dff5a424586183f44829bc9e6319e131e41ba7f5b93156f",
+  "published_at": "2026-11-09T03:49:28.814229+00:00",
+  "notes": "## New\n- In-app updates now come from Forgejo (git.serrebiradio.com/serrebi/Plexible) instead of GitHub; the updater checks Forgejo releases.",
   "signing_thumbprint": "FB99DDCECA07B170E0A950F0C780AD899D28D770"
 }

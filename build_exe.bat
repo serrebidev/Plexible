@@ -151,7 +151,8 @@ if "%DRY_RUN%"=="0" (
     )
 )
 
-set "REPO_OWNER=serrebidev"
+set "REPO_HOST=git.serrebiradio.com"
+set "REPO_OWNER=serrebi"
 set "REPO_NAME=Plexible"
 for /f "usebackq tokens=1* delims==" %%A in (`%PYTHON_CMD% "%RELEASE_TOOL%" repo-origin`) do (
     set "%%A=%%B"
@@ -193,7 +194,7 @@ set "ZIP_NAME=Plexible-v%NEXT_VERSION%.zip"
 set "ZIP_PATH=%ROOT_DIR%%ZIP_NAME%"
 set "ZIP_LATEST=%ROOT_DIR%Plexible.zip"
 set "DIST_DIR=%DIST_ROOT%\Plexible"
-set "DOWNLOAD_URL=https://github.com/%REPO_OWNER%/%REPO_NAME%/releases/download/v%NEXT_VERSION%/%ZIP_NAME%"
+set "DOWNLOAD_URL=https://%REPO_HOST%/%REPO_OWNER%/%REPO_NAME%/releases/download/v%NEXT_VERSION%/%ZIP_NAME%"
 if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
 
 if "%DRY_RUN%"=="1" (
@@ -274,7 +275,8 @@ if "%DRY_RUN%"=="1" (
     for /f "usebackq delims=" %%A in (`git branch --show-current`) do set "CURRENT_BRANCH=%%A"
     echo [dry-run] git push origin !CURRENT_BRANCH!
     echo [dry-run] git push origin v%NEXT_VERSION%
-    echo [dry-run] gh release create v%NEXT_VERSION% "%ZIP_PATH%" "%MANIFEST_FILE%" --title "v%NEXT_VERSION%" --notes-file "%NOTES_FILE%"
+    echo [dry-run] git push forgejo !CURRENT_BRANCH! ^&^& git push forgejo v%NEXT_VERSION%
+    echo [dry-run] %PYTHON_CMD% "%ROOT_DIR%tools\forgejo_release.py" create v%NEXT_VERSION% "%ZIP_PATH%" "%MANIFEST_FILE%" --title "v%NEXT_VERSION%" --notes-file "%NOTES_FILE%"
     popd >nul
     exit /b 0
 )
@@ -311,9 +313,32 @@ if errorlevel 1 (
     exit /b 1
 )
 
-gh release create v%NEXT_VERSION% "%ZIP_PATH%" "%MANIFEST_FILE%" --title "v%NEXT_VERSION%" --notes-file "%NOTES_FILE%"
+git remote get-url forgejo >nul 2>&1
+if not errorlevel 1 (
+    git push forgejo "%CURRENT_BRANCH%"
+    if errorlevel 1 (
+        echo Forgejo branch push failed!
+        popd >nul
+        exit /b 1
+    )
+    git push forgejo v%NEXT_VERSION%
+    if errorlevel 1 (
+        echo Forgejo tag push failed!
+        popd >nul
+        exit /b 1
+    )
+) else (
+    echo WARNING: No forgejo remote; skipping Forgejo push.
+)
+
+if not defined FORGEJO_TOKEN (
+    echo ERROR: FORGEJO_TOKEN is not set. Create a Forgejo API token and set it before releasing.
+    popd >nul
+    exit /b 1
+)
+%PYTHON_CMD% "%ROOT_DIR%tools\forgejo_release.py" create v%NEXT_VERSION% "%ZIP_PATH%" "%MANIFEST_FILE%" --title "v%NEXT_VERSION%" --notes-file "%NOTES_FILE%"
 if errorlevel 1 (
-    echo GitHub release creation failed!
+    echo Forgejo release creation failed!
     popd >nul
     exit /b 1
 )

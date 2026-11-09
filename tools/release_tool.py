@@ -19,6 +19,13 @@ def _run_git(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
+def _remote_url(remote: str) -> str | None:
+    try:
+        return _run_git("remote", "get-url", remote)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _parse_tag(tag: str) -> Optional[Tuple[int, int, int]]:
     match = SEMVER_TAG_RE.match(tag.strip())
     if not match:
@@ -169,17 +176,37 @@ def _manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _split_repo_url(url: str) -> tuple[str, str, str] | None:
+    """Split a git remote URL into (host, owner, name)."""
+    match = re.match(r"(?:https?://|ssh://)?(?:[^@/:]+@)?([^/:]+)[:/](.+)$", url.strip())
+    if not match:
+        return None
+    path = match.group(2).rstrip("/").removesuffix(".git")
+    if "/" not in path:
+        return None
+    owner, name = path.rsplit("/", 1)
+    host = match.group(1)
+    if not host or not owner or not name:
+        return None
+    return host, owner, name
+
+
 def _repo_origin(args: argparse.Namespace) -> int:
-    owner = "serrebidev"
+    host = "git.serrebiradio.com"
+    owner = "serrebi"
     name = "Plexible"
-    try:
-        url = _run_git("remote", "get-url", "origin")
-    except Exception:
-        url = ""
-    match = re.search(r"github\.com[:/](.+?)/([^/.]+)", url)
-    if match:
-        owner = match.group(1)
-        name = match.group(2)
+    # Releases live on Forgejo; prefer the forgejo remote so a GitHub mirror
+    # origin cannot override the release URLs back to github.com.
+    for remote in ("forgejo", "origin"):
+        url = _remote_url(remote)
+        if url is None:
+            continue
+        split = _split_repo_url(url)
+        if split is None:
+            continue
+        host, owner, name = split
+        break
+    print(f"REPO_HOST={host}")
     print(f"REPO_OWNER={owner}")
     print(f"REPO_NAME={name}")
     return 0

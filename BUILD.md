@@ -10,7 +10,7 @@ build_exe.bat build
 ```
 
 This builds, signs, zips, and writes local update metadata without creating a
-git tag or GitHub release.
+git tag or Forgejo release.
 
 ## Release
 
@@ -21,17 +21,17 @@ build_exe.bat release
 This is the release path. It computes the next version from git tags, updates
 `plex_client/version.py`, builds from `plexible.spec`, signs `Plexible.exe`,
 creates the release zip and `Plexible-update.json`, commits the version bump,
-tags it, pushes the commit and tag, and creates the GitHub release.
+tags it, pushes the commit and tag, and creates the Forgejo release.
 
 ## Draft Release Policy
 
 Draft releases are not allowed for Plexible.
 
-- Do not use `gh release create --draft`.
-- Do not use the GitHub UI's draft release flow.
-- Before a release, delete any GitHub release where `draft == true`.
+- Do not create draft releases (`tools/forgejo_release.py` never sets `draft`).
+- Do not use the Forgejo UI's draft release flow.
+- Before a release, delete any Forgejo release where `draft == true`.
 - After a release, verify that the latest release has `draft == false` and that
-  no release returned by the GitHub Releases API is a draft.
+  no release returned by the Forgejo Releases API is a draft.
 
 Cloud agents release with the `Cloud Release` workflow (`cloud-release.yml`),
 which runs `build_exe.bat release` on a GitHub Windows runner and adds macOS
