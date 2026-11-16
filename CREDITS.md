@@ -12,3 +12,12 @@ Third-party projects it uses:
 Plex is Plex's. This is a client, not an official Plex app.
 
 Questions and bug reports are welcome in the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects). More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com).
+
+
+## About this project
+
+- GitHub profile: [serrebidev](https://github.com/serrebidev)
+- Repository (GitHub): [https://github.com/serrebidev/Plexible](https://github.com/serrebidev/Plexible)
+- Repository (Forgejo): [https://git.serrebiradio.com/serrebi/Plexible](https://git.serrebiradio.com/serrebi/Plexible)
+- Projects site: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+- Questions and bug reports: [SerrebiProjects Telegram group](https://t.me/SerrebiProjects)
