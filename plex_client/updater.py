@@ -175,6 +175,10 @@ def _verify_authenticode(exe_path: Path, allowed_thumbprints: Iterable[str]) -> 
         capture_output=True,
         text=True,
         check=False,
+        # PowerShell 7 sets PSModulePath to its own module folders; Windows
+        # PowerShell 5.1 inheriting it cannot load Microsoft.PowerShell.Security,
+        # so Get-AuthenticodeSignature fails and every update looks unsigned.
+        env={k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"},
     )
     if result.returncode != 0:
         raise UpdateError(
