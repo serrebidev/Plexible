@@ -7,6 +7,7 @@ Third-party projects it uses:
 - python-plexapi (the pushingkarmaorg fork).
 - LibVLC for the embedded playback surface (a local VLC installation that Python can discover is required).
 - wxPython for the interface.
+- The NVDA controller client (`nvdaControllerClient.dll` in `bin/`) for screen-reader detection; it stays under its own LGPL license (`bin/nvdaControllerClient-license.txt`).
 
 Plex is Plex's. This is a client, not an official Plex app.
 
