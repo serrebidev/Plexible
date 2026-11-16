@@ -196,6 +196,9 @@ set "ZIP_LATEST=%ROOT_DIR%Plexible.zip"
 set "DIST_DIR=%DIST_ROOT%\Plexible"
 set "DOWNLOAD_URL=https://%REPO_HOST%/%REPO_OWNER%/%REPO_NAME%/releases/download/v%NEXT_VERSION%/%ZIP_NAME%"
 if not defined SIGN_CERT_STORE set "SIGN_CERT_STORE=MY"
+rem Pin the release cert: signtool /a picks any code-signing cert in the store
+rem (an unrelated trust_* cert won once), and the updater accepts only FB99.
+if not defined SIGN_CERT_THUMBPRINT set "SIGN_CERT_THUMBPRINT=FB99DDCECA07B170E0A950F0C780AD899D28D770"
 
 if "%DRY_RUN%"=="1" (
     echo [dry-run] %PYTHON_CMD% -m PyInstaller --noconfirm "%SPEC_FILE%"
