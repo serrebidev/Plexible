@@ -2,7 +2,11 @@
 
 Plexible is a desktop Plex client built with wxPython and the latest [`python-plexapi`](https://github.com/pushingkarmaorg/python-plexapi) fork. It supports browser-based authentication, browsing any Plex library, and streaming video or audio through an embedded VLC.
 
+[![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
+
 **Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects), the fastest place to get help.
+
+More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com)
 
 ## Features
 - Plex account sign-in using the official browser PIN flow.
@@ -121,3 +125,7 @@ This project is provided without an explicit license. Adapt it to your needs or 
 
 ##Submit bugs in issues, or join my Telegram group!
 (https://t.me/SerrebiProjects)
+
+## Credits
+
+See [CREDITS.md](CREDITS.md) for where the ideas behind this project came from, and the third-party projects it builds on.
