@@ -388,4 +388,8 @@ MESSAGES = {
     "{title} Radio": "Radio {title}",
     "{volume}%": "{volume} %",
     "⏮ Prev": "⏮ Préc.",
+    "About...": "À propos...",
+    "About Plexible": "À propos de Plexible",
+    "An accessible Plex client for screen readers.\nMIT license.\n\nAuthor: serrebidev.": "Un client Plex accessible pour les lecteurs d'écran.\nLicence MIT.\n\nAuteur : serrebidev.",
+    "Plexible %s": "Plexible %s",
 }
