@@ -392,4 +392,9 @@ MESSAGES = {
     "About Plexible": "À propos de Plexible",
     "An accessible Plex client for screen readers.\nMIT license.\n\nAuthor: serrebidev.": "Un client Plex accessible pour les lecteurs d'écran.\nLicence MIT.\n\nAuteur : serrebidev.",
     "Plexible %s": "Plexible %s",
+    "Report an &issue on GitHub...": "Signaler un &problème sur GitHub...",
+    "Describe a problem or an idea, then send it as a GitHub issue": "Décrire un problème ou une idée, puis l'envoyer comme ticket GitHub",
+    "Report an issue": "Signaler un problème",
+    "Issue title: one line saying what went wrong or what you would like": "Titre : une ligne qui dit ce qui n'a pas marché ou ce que vous souhaitez",
+    "Describe what you did, what happened, and what you expected.\nYour browser then opens GitHub with this filled in. Sign in and press Create.": "Décrivez ce que vous avez fait, ce qui s'est passé et ce que vous attendiez.\nVotre navigateur ouvre ensuite GitHub avec ces informations. Connectez-vous et appuyez sur « Create ».",
 }

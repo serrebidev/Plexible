@@ -29,7 +29,7 @@ from ..plex_service import (
 from .. import screen_reader
 from ..updater import UpdateManager
 from ..version import APP_VERSION
-from .about_dialog import show_about, serrebi_links
+from .about_dialog import report_issue, show_about, serrebi_links
 
 # Plex type codes -> labels shown to the user (translated where displayed).
 _TYPE_LABELS: Dict[str, str] = {
@@ -747,6 +747,11 @@ class MainFrame(wx.Frame):
         help_menu.AppendSeparator()
         self._check_updates_item = help_menu.Append(wx.ID_ANY, _("Check for Updates..."))
         self._auto_update_item = help_menu.AppendCheckItem(wx.ID_ANY, _("Automatically Check for Updates"))
+        self._report_issue_item = help_menu.Append(
+            wx.ID_ANY,
+            _("Report an &issue on GitHub..."),
+            _("Describe a problem or an idea, then send it as a GitHub issue"),
+        )
         self._about_item = help_menu.Append(wx.ID_ANY, _("About..."))
         self._auto_update_item.Check(self._update_manager.is_auto_check_enabled())
         menu_bar.Append(help_menu, _("&Help"))
@@ -772,6 +777,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._handle_player_announce, self._player_announce_item)
         self.Bind(wx.EVT_MENU, self._handle_player_fullscreen, self._player_fullscreen_item)
         self.Bind(wx.EVT_MENU, self._handle_toggle_dark_mode, self._dark_mode_item)
+        self.Bind(wx.EVT_MENU, self._handle_report_issue, self._report_issue_item)
         self.Bind(wx.EVT_MENU, self._handle_about, self._about_item)
         self.Bind(wx.EVT_MENU, self._handle_check_updates, self._check_updates_item)
         self.Bind(wx.EVT_MENU, self._handle_toggle_auto_updates, self._auto_update_item)
@@ -800,6 +806,9 @@ class MainFrame(wx.Frame):
 
     def _handle_check_updates(self, _event: wx.CommandEvent) -> None:
         self._update_manager.check_for_updates(interactive=True)
+
+    def _handle_report_issue(self, _event: wx.CommandEvent) -> None:
+        report_issue(self, "serrebidev/Plexible", f"Plexible {APP_VERSION}", _)
 
     def _handle_about(self, _event: wx.CommandEvent) -> None:
         show_about(
